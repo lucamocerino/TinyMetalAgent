@@ -1,0 +1,13 @@
+{
+  "id": "qwen2.5-3b",
+  "family": "qwen2.5",
+  "gguf_path": null,
+  "quantization": "q8-q4-planned",
+  "context_size": 32768,
+  "recommended_context_8gb": 4096,
+  "estimated_weight_mb": 3600,
+  "estimated_kv_cache_mb_4k": 750,
+  "backend": "custom-metal",
+  "role": "second-engine-target",
+  "source": "huggingface-first-gguf-oracle"
+}

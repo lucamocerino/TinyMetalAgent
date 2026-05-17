@@ -1,0 +1,40 @@
+{
+  "model_dir": "/Users/lucamocerino/projects/mlx-qwen-lab/models/Qwen2.5-0.5B-Instruct-4bit",
+  "prompt": "Rispondi in italiano con tre parole: cosa sei?",
+  "prompt_tokens_total": 21,
+  "prompt_tokens_used": 10,
+  "projection_backend": "cpu",
+  "generated_token_ids": [
+    41887,
+    521,
+    34214,
+    8515
+  ],
+  "generated_text": "Mi chiamo Alex",
+  "load_ms": 281.16108299999996,
+  "eval_ms": 6872.7672919999995,
+  "total_ms": 7154.339207999999,
+  "token_eval_ms": [
+    493.139916,
+    487.75033299999996,
+    502.51416699999993,
+    488.361292,
+    490.43575,
+    487.802459,
+    495.790666,
+    488.22695799999997,
+    487.610667,
+    490.747834,
+    487.574416,
+    487.313042,
+    486.944541,
+    497.564166
+  ],
+  "avg_token_eval_ms": 490.8411576428571,
+  "min_token_eval_ms": 486.944541,
+  "max_token_eval_ms": 502.51416699999993,
+  "eval_tokens_per_second": 2.037025175622664,
+  "q4_projection_groups_per_eval_token": 169,
+  "q4_projection_groups_total": 2366,
+  "note": "CPU reference end-to-end over real MLX 4-bit Qwen weights; this validates model graph and q4 affine loading."
+}

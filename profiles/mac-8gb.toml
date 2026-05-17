@@ -1,0 +1,10 @@
+name = "mac-8gb"
+ctx_size = 4096
+batch_size = 128
+ubatch_size = 64
+threads = "auto"
+metal = true
+recommended_quant = "Q4_K_M"
+max_loaded_models = 1
+memory_limit_mb = 5500
+

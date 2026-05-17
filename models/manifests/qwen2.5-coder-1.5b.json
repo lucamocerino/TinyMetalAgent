@@ -1,0 +1,13 @@
+{
+  "id": "qwen2.5-coder-1.5b",
+  "family": "qwen2.5-coder",
+  "gguf_path": null,
+  "quantization": "tma-f16-first-q8-q4-planned",
+  "context_size": 32768,
+  "recommended_context_8gb": 4096,
+  "estimated_weight_mb": 3100,
+  "estimated_kv_cache_mb_4k": 450,
+  "backend": "custom-metal",
+  "role": "first-engine-target",
+  "source": "huggingface-first-gguf-oracle"
+}

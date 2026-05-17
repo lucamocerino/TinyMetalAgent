@@ -1,0 +1,113 @@
+{
+  "benchmark": "qwen-phase-benchmark-v1",
+  "device": "Apple M1",
+  "source": {
+    "model_id": "Qwen2.5-0.5B-Instruct-4bit",
+    "hf_dir": "/Users/lucamocerino/projects/mlx-qwen-lab/models/Qwen2.5-0.5B-Instruct-4bit"
+  },
+  "artifacts": {
+    "tokenizer_json_bytes": 11421892,
+    "safetensors_index_bytes": 44248,
+    "safetensors_total_size_bytes": 277996288,
+    "safetensors_total_parameters": 494032768
+  },
+  "qwen_config": {
+    "hidden_size": 896,
+    "intermediate_size": 4864,
+    "num_hidden_layers": 24,
+    "num_attention_heads": 14,
+    "num_key_value_heads": 2,
+    "head_dim": 64,
+    "vocab_size": 151936,
+    "max_position_embeddings": 32768,
+    "rope_theta": 1000000
+  },
+  "iterations": 25,
+  "config_read_ms": 0.39587500000000003,
+  "tokenizer_read_ms": 1.915459,
+  "safetensors_index_read_ms": 0.48845900000000003,
+  "decode_matmul_baseline": {
+    "name": "decode_projection_matmul_f16_1x896x896_baseline_hot",
+    "shape": "m=1,n=896,k=896",
+    "logical_ops_per_iter": 1605632,
+    "total_elapsed_ms": 6.993666,
+    "avg_elapsed_ms": 0.27974664,
+    "throughput_gops": 5.739593512186599
+  },
+  "decode_matvec_speedup_vs_matmul": 1.2230697999781397,
+  "decode_projection": {
+    "name": "decode_projection_matvec_f16_896x896_hot",
+    "shape": "n=896,k=896",
+    "logical_ops_per_iter": 1605632,
+    "total_elapsed_ms": 5.718125,
+    "avg_elapsed_ms": 0.22872499999999998,
+    "throughput_gops": 7.019923488905891
+  },
+  "prefill": [
+    {
+      "prompt_tokens": 1,
+      "projection_kernel": {
+        "name": "prefill_projection_f16_1x896x896_hot",
+        "shape": "m=1,n=896,k=896",
+        "logical_ops_per_iter": 1605632,
+        "total_elapsed_ms": 8.144709,
+        "avg_elapsed_ms": 0.32578836,
+        "throughput_gops": 4.9284510962884
+      },
+      "estimated_full_prefill_ops": 715739136,
+      "estimated_first_decode_ops": 988008448,
+      "estimated_full_prefill_ms": 145.2259791192857,
+      "estimated_first_decode_ms": 140.743478125,
+      "estimated_ttft_ms": 288.7692502442857
+    },
+    {
+      "prompt_tokens": 32,
+      "projection_kernel": {
+        "name": "prefill_projection_f16_32x896x896_hot",
+        "shape": "m=32,n=896,k=896",
+        "logical_ops_per_iter": 51380224,
+        "total_elapsed_ms": 10.856584000000002,
+        "avg_elapsed_ms": 0.43426336000000004,
+        "throughput_gops": 118.31581646676338
+      },
+      "estimated_full_prefill_ops": 22988980224,
+      "estimated_first_decode_ops": 990674944,
+      "estimated_full_prefill_ms": 194.30183478857143,
+      "estimated_first_decode_ms": 141.123325,
+      "estimated_ttft_ms": 338.2249527885714
+    },
+    {
+      "prompt_tokens": 128,
+      "projection_kernel": {
+        "name": "prefill_projection_f16_128x896x896_hot",
+        "shape": "m=128,n=896,k=896",
+        "logical_ops_per_iter": 205520896,
+        "total_elapsed_ms": 24.150250000000003,
+        "avg_elapsed_ms": 0.9660100000000001,
+        "throughput_gops": 212.75234831937556
+      },
+      "estimated_full_prefill_ops": 93012885504,
+      "estimated_first_decode_ops": 998932480,
+      "estimated_full_prefill_ms": 437.1885257142858,
+      "estimated_first_decode_ms": 142.299625,
+      "estimated_ttft_ms": 582.2879437142858
+    },
+    {
+      "prompt_tokens": 512,
+      "projection_kernel": {
+        "name": "prefill_projection_f16_512x896x896_hot",
+        "shape": "m=512,n=896,k=896",
+        "logical_ops_per_iter": 822083584,
+        "total_elapsed_ms": 49.779542000000006,
+        "avg_elapsed_ms": 1.9911816800000002,
+        "throughput_gops": 412.8621673538097
+      },
+      "estimated_full_prefill_ops": 388962975744,
+      "estimated_first_decode_ops": 1031962624,
+      "estimated_full_prefill_ms": 942.1133891657145,
+      "estimated_first_decode_ms": 147.004825,
+      "estimated_ttft_ms": 1091.9180071657145
+    }
+  ],
+  "note": "Synthetic TinyEngine phase benchmark: prefill uses hot Metal matmul; decode/TTFT now use the dedicated hot Metal matvec path. Full end-to-end inference is not wired yet."
+}

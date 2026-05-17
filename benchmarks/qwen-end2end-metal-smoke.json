@@ -1,0 +1,40 @@
+{
+  "model_dir": "/Users/lucamocerino/projects/mlx-qwen-lab/models/Qwen2.5-0.5B-Instruct-4bit",
+  "prompt": "Rispondi in italiano con tre parole: cosa sei?",
+  "prompt_tokens_total": 21,
+  "prompt_tokens_used": 10,
+  "projection_backend": "metal",
+  "generated_token_ids": [
+    41887,
+    521,
+    34214,
+    8515
+  ],
+  "generated_text": "Mi chiamo Alex",
+  "load_ms": 418.494958,
+  "eval_ms": 870.064375,
+  "total_ms": 1288.96175,
+  "token_eval_ms": [
+    69.257458,
+    47.898792,
+    48.82975,
+    53.868334,
+    59.369667,
+    59.219,
+    60.483166999999995,
+    62.787209,
+    65.41137499999999,
+    67.6365,
+    68.4145,
+    69.619875,
+    69.08666600000001,
+    65.150333
+  ],
+  "avg_token_eval_ms": 61.93090185714285,
+  "min_token_eval_ms": 47.898792,
+  "max_token_eval_ms": 69.619875,
+  "eval_tokens_per_second": 16.090763398972634,
+  "q4_projection_groups_per_eval_token": 97,
+  "q4_projection_groups_total": 1358,
+  "note": "Hybrid TinyEngine end-to-end over real MLX 4-bit Qwen weights: q4 affine projections run on the reusable Metal kernel with GPU-resident q4 tensors; scalar ops and attention are still CPU."
+}

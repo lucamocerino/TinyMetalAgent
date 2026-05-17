@@ -1,0 +1,15 @@
+[package]
+name = "tinyagent-backend-metal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+half = "2"
+metal = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tinyagent-core = { path = "../tinyagent-core" }
+tokenizers = "0.20"
