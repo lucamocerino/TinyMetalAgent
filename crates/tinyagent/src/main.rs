@@ -3,6 +3,7 @@ use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
+    process::Command,
     sync::Arc,
     time::Instant,
 };
@@ -24,12 +25,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tinyagent_backend_llama::{LlamaServerBackend, LlamaServerConfig};
 use tinyagent_backend_metal::{
-    run_add_kernel_probe, run_attention_probe, run_f16_matmul_probe, run_f16_matvec_probe,
-    run_greedy_sampler_probe, run_hot_f16_matmul_bench, run_hot_f16_matvec_bench,
-    run_kv_cache_append_probe, run_q4_affine_matvec_probe, run_qwen_15b_hot_bench,
-    run_qwen_15b_smoke_bench, run_qwen_mlx_end2end, run_rmsnorm_probe, run_rope_probe,
-    run_softmax_probe, run_swiglu_probe, HotKernelBenchmarkResult, MetalBackend,
-    MetalBackendConfig, MetalDeviceInfo, QwenMlxRunConfig, QwenProjectionBackend,
+    format_qwen_chat_prompt, run_add_kernel_probe, run_attention_probe, run_f16_matmul_probe,
+    run_f16_matvec_probe, run_greedy_sampler_probe, run_hot_f16_matmul_bench,
+    run_hot_f16_matvec_bench, run_kv_cache_append_probe, run_q4_affine_matvec_probe,
+    run_qwen_15b_hot_bench, run_qwen_15b_smoke_bench, run_qwen_gguf_end2end, run_qwen_mlx_end2end,
+    run_rmsnorm_probe, run_rope_probe, run_softmax_probe, run_swiglu_probe,
+    HotKernelBenchmarkResult, MetalBackend, MetalBackendConfig, MetalDeviceInfo, QwenGgufRunConfig,
+    QwenMlxRunConfig, QwenMlxRunResult, QwenProjectionBackend,
 };
 use tinyagent_core::{
     ChatMessage, GenerateRequest, HardwareProfile, InferenceBackend, MessageRole, ModelInfo,
@@ -98,6 +100,7 @@ enum EngineCommand {
     Bench(EngineBenchArgs),
     PhaseBench(EnginePhaseBenchArgs),
     QwenRun(EngineQwenRunArgs),
+    Compare(EngineCompareArgs),
     Inspect(EngineInspectArgs),
 }
 
@@ -139,6 +142,49 @@ struct EngineQwenRunArgs {
     max_prompt_tokens: usize,
     #[arg(long, value_enum, default_value_t = QwenProjectionBackendArg::Metal)]
     projection_backend: QwenProjectionBackendArg,
+}
+
+#[derive(Debug, Args)]
+struct EngineCompareArgs {
+    #[arg(long, value_name = "DIR")]
+    hf_dir: PathBuf,
+    #[arg(long, value_name = "FILE")]
+    gguf: PathBuf,
+    #[arg(
+        long,
+        default_value = "/Users/lucamocerino/projects/tools/llama.cpp-b9219/current/llama-completion",
+        value_name = "PATH"
+    )]
+    llama_bin: PathBuf,
+    #[arg(long, default_value = "Rispondi in italiano con tre parole: cosa sei?")]
+    prompt: String,
+    #[arg(long, default_value_t = 4)]
+    max_tokens: usize,
+    #[arg(long, default_value_t = 512)]
+    max_prompt_tokens: usize,
+    #[arg(long, value_enum, default_value_t = QwenProjectionBackendArg::Metal)]
+    projection_backend: QwenProjectionBackendArg,
+    #[arg(long, value_enum, default_value_t = TinyEngineCompareSourceArg::Mlx)]
+    tinyengine_source: TinyEngineCompareSourceArg,
+    #[arg(long, default_value_t = 512)]
+    ctx_size: u32,
+    #[arg(long, default_value_t = 999)]
+    gpu_layers: i32,
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+    #[arg(long, default_value_t = 1)]
+    runs: usize,
+    #[arg(long)]
+    llama_warmup: bool,
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum TinyEngineCompareSourceArg {
+    Mlx,
+    Gguf,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -369,6 +415,10 @@ async fn run_engine(args: EngineArgs) -> anyhow::Result<()> {
             })?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
+        EngineCommand::Compare(args) => {
+            let report = run_engine_compare(args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
     }
 
     Ok(())
@@ -491,6 +541,398 @@ fn run_engine_phase_bench(args: EnginePhaseBenchArgs) -> anyhow::Result<PhaseBen
     }
 
     Ok(report)
+}
+
+fn run_engine_compare(args: EngineCompareArgs) -> anyhow::Result<AppleToAppleCompareReport> {
+    anyhow::ensure!(args.runs > 0, "compare runs must be greater than zero");
+    anyhow::ensure!(args.max_tokens > 0, "max_tokens must be greater than zero");
+    anyhow::ensure!(
+        args.max_prompt_tokens > 0,
+        "max_prompt_tokens must be greater than zero"
+    );
+    anyhow::ensure!(
+        args.hf_dir.is_dir(),
+        "TinyEngine HF/MLX model or tokenizer directory does not exist: {:?}",
+        args.hf_dir
+    );
+    anyhow::ensure!(
+        args.gguf.is_file(),
+        "llama.cpp GGUF model does not exist: {:?}",
+        args.gguf
+    );
+    anyhow::ensure!(
+        args.llama_bin.is_file(),
+        "llama.cpp completion binary does not exist: {:?}",
+        args.llama_bin
+    );
+
+    let projection_backend = match args.projection_backend {
+        QwenProjectionBackendArg::Cpu => QwenProjectionBackend::Cpu,
+        QwenProjectionBackendArg::Metal => QwenProjectionBackend::Metal,
+    };
+    let device = MetalDeviceInfo::system_default()?;
+    let formatted_prompt = format_qwen_chat_prompt(&args.prompt);
+    let llama_cpp_version = read_llama_version(&args.llama_bin)?;
+    let models = AppleToAppleModels {
+        tinyengine_hf_dir: args.hf_dir.clone(),
+        tinyengine_safetensors_bytes: match args.tinyengine_source {
+            TinyEngineCompareSourceArg::Mlx => {
+                optional_file_size(&args.hf_dir.join("model.safetensors"))?
+            }
+            TinyEngineCompareSourceArg::Gguf => None,
+        },
+        llama_gguf: args.gguf.clone(),
+        llama_gguf_bytes: optional_file_size(&args.gguf)?.unwrap_or(0),
+        llama_bin: args.llama_bin.clone(),
+    };
+    let settings = AppleToAppleSettings {
+        prompt: args.prompt.clone(),
+        formatted_prompt: formatted_prompt.clone(),
+        max_tokens: args.max_tokens,
+        max_prompt_tokens: args.max_prompt_tokens,
+        projection_backend,
+        tinyengine_source: args.tinyengine_source,
+        ctx_size: args.ctx_size,
+        gpu_layers: args.gpu_layers,
+        seed: args.seed,
+        llama_warmup: args.llama_warmup,
+        runs: args.runs,
+    };
+
+    let mut runs = Vec::with_capacity(args.runs);
+    for run_index in 0..args.runs {
+        let tinyengine = match args.tinyengine_source {
+            TinyEngineCompareSourceArg::Mlx => run_qwen_mlx_end2end(QwenMlxRunConfig {
+                hf_dir: args.hf_dir.clone(),
+                prompt: args.prompt.clone(),
+                max_tokens: args.max_tokens,
+                max_prompt_tokens: args.max_prompt_tokens,
+                projection_backend,
+            })?,
+            TinyEngineCompareSourceArg::Gguf => run_qwen_gguf_end2end(QwenGgufRunConfig {
+                gguf_path: args.gguf.clone(),
+                tokenizer_dir: args.hf_dir.clone(),
+                prompt: args.prompt.clone(),
+                max_tokens: args.max_tokens,
+                max_prompt_tokens: args.max_prompt_tokens,
+                projection_backend,
+            })?,
+        };
+        let llama_cpp = run_llama_completion(&args, &formatted_prompt)?;
+        let comparison = build_apple_to_apple_comparison(&tinyengine, &llama_cpp);
+        runs.push(AppleToAppleRun {
+            run_index,
+            tinyengine,
+            llama_cpp,
+            comparison,
+        });
+    }
+
+    let report = AppleToAppleCompareReport {
+        benchmark: "qwen2.5-0.5b-apple-to-apple-v1",
+        device: device.name,
+        llama_cpp_version,
+        models,
+        settings,
+        summary: build_apple_to_apple_summary(&runs),
+        runs,
+        note: match args.tinyengine_source {
+            TinyEngineCompareSourceArg::Mlx => "Same base Qwen2.5 0.5B instruct prompt and deterministic generation settings. Quantization is same class but not bit-identical: TinyEngine uses MLX affine 4-bit weights, llama.cpp uses GGUF weights. llama.cpp decode eval follows its reported convention: max_tokens generated usually means max_tokens - 1 eval runs after prompt eval.".to_string(),
+            TinyEngineCompareSourceArg::Gguf => "Same Qwen2.5 0.5B GGUF file, same quantized tensors, same prompt, and deterministic generation settings. TinyEngine maps GGUF Q4_0 blocks and GGUF Q8_0 output.weight onto Metal kernels.".to_string(),
+        },
+    };
+
+    if let Some(out) = args.out {
+        if let Some(parent) = out.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        fs::write(&out, serde_json::to_string_pretty(&report)?)?;
+    }
+
+    Ok(report)
+}
+
+fn run_llama_completion(
+    args: &EngineCompareArgs,
+    formatted_prompt: &str,
+) -> anyhow::Result<LlamaCompletionRun> {
+    let mut argv = vec![
+        "-m".to_string(),
+        args.gguf.display().to_string(),
+        "-p".to_string(),
+        formatted_prompt.to_string(),
+        "-n".to_string(),
+        args.max_tokens.to_string(),
+        "--temp".to_string(),
+        "0".to_string(),
+        "--top-k".to_string(),
+        "1".to_string(),
+        "--seed".to_string(),
+        args.seed.to_string(),
+        "--no-display-prompt".to_string(),
+        "-no-cnv".to_string(),
+        "--simple-io".to_string(),
+        "-ngl".to_string(),
+        args.gpu_layers.to_string(),
+        "-c".to_string(),
+        args.ctx_size.to_string(),
+    ];
+    if !args.llama_warmup {
+        argv.push("--no-warmup".to_string());
+    }
+
+    let started = Instant::now();
+    let output = Command::new(&args.llama_bin)
+        .args(&argv)
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .output()
+        .with_context(|| format!("failed to run {:?}", args.llama_bin))?;
+    let wall_ms = elapsed_ms(started);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        bail!(
+            "llama-completion failed with status {}:\n{}",
+            output.status,
+            stderr_tail(&stderr, 40)
+        );
+    }
+
+    let timings = parse_llama_completion_timings(&stderr)?;
+    Ok(LlamaCompletionRun {
+        argv,
+        generated_text: clean_generated_text(&stdout),
+        wall_ms,
+        load_ms: timings.load_ms,
+        prompt_eval_ms: timings.prompt_eval_ms,
+        prompt_eval_tokens: timings.prompt_eval_tokens,
+        prompt_tokens_per_second: tokens_per_second(
+            timings.prompt_eval_tokens,
+            timings.prompt_eval_ms,
+        ),
+        eval_ms: timings.eval_ms,
+        eval_runs: timings.eval_runs,
+        eval_tokens_per_second: tokens_per_second(timings.eval_runs, timings.eval_ms),
+        total_ms: timings.total_ms,
+        total_tokens: timings.total_tokens,
+        stderr_tail: stderr_tail(&stderr, 30),
+    })
+}
+
+fn read_llama_version(llama_bin: &PathBuf) -> anyhow::Result<String> {
+    let output = Command::new(llama_bin)
+        .arg("--version")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .output()
+        .with_context(|| format!("failed to run {:?} --version", llama_bin))?;
+    if !output.status.success() {
+        bail!("failed to read llama.cpp version from {:?}", llama_bin);
+    }
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | "))
+}
+
+fn parse_llama_completion_timings(stderr: &str) -> anyhow::Result<LlamaCompletionTimings> {
+    let load_ms = parse_perf_ms(stderr, "load time")?;
+    let (prompt_eval_ms, prompt_eval_tokens) = parse_perf_ms_count(stderr, "prompt eval time")?;
+    let (eval_ms, eval_runs) = parse_perf_ms_count(stderr, "eval time")?;
+    let (total_ms, total_tokens) = parse_perf_ms_count(stderr, "total time")?;
+    Ok(LlamaCompletionTimings {
+        load_ms,
+        prompt_eval_ms,
+        prompt_eval_tokens,
+        eval_ms,
+        eval_runs,
+        total_ms,
+        total_tokens,
+    })
+}
+
+fn parse_perf_ms(stderr: &str, label: &str) -> anyhow::Result<f64> {
+    for line in stderr.lines() {
+        let metric = perf_metric(line);
+        if !metric.trim_start().starts_with(label) {
+            continue;
+        }
+        let (_, after_equals) = metric
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("missing `=` in llama.cpp timing line: {line}"))?;
+        let raw_ms = after_equals
+            .trim_start()
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing ms value in llama.cpp timing line: {line}"))?;
+        return parse_float(raw_ms)
+            .with_context(|| format!("invalid ms value `{raw_ms}` in llama.cpp timing line"));
+    }
+    bail!("missing llama.cpp timing line `{label}`")
+}
+
+fn parse_perf_ms_count(stderr: &str, label: &str) -> anyhow::Result<(f64, usize)> {
+    for line in stderr.lines() {
+        let metric = perf_metric(line);
+        if !metric.trim_start().starts_with(label) {
+            continue;
+        }
+        let ms = parse_perf_ms(line, label)?;
+        let (_, after_slash) = metric
+            .split_once('/')
+            .ok_or_else(|| anyhow::anyhow!("missing `/` count in llama.cpp timing line: {line}"))?;
+        let raw_count = after_slash
+            .trim_start()
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing count in llama.cpp timing line: {line}"))?;
+        let count = raw_count
+            .parse::<usize>()
+            .with_context(|| format!("invalid count `{raw_count}` in llama.cpp timing line"))?;
+        return Ok((ms, count));
+    }
+    bail!("missing llama.cpp timing line `{label}`")
+}
+
+fn perf_metric(line: &str) -> &str {
+    line.split_once("common_perf_print:")
+        .map(|(_, metric)| metric)
+        .unwrap_or(line)
+}
+
+fn parse_float(raw: &str) -> anyhow::Result<f64> {
+    Ok(raw.replace(',', ".").parse::<f64>()?)
+}
+
+fn clean_generated_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn stderr_tail(stderr: &str, lines: usize) -> String {
+    let all_lines = stderr.lines().collect::<Vec<_>>();
+    let start = all_lines.len().saturating_sub(lines);
+    all_lines[start..].join("\n")
+}
+
+fn optional_file_size(path: &std::path::Path) -> anyhow::Result<Option<u64>> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(Some(metadata.len())),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn tokens_per_second(tokens: usize, elapsed_ms: f64) -> f64 {
+    if elapsed_ms > 0.0 {
+        tokens as f64 / (elapsed_ms / 1000.0)
+    } else {
+        0.0
+    }
+}
+
+fn build_apple_to_apple_comparison(
+    tinyengine: &QwenMlxRunResult,
+    llama_cpp: &LlamaCompletionRun,
+) -> AppleToAppleRunComparison {
+    AppleToAppleRunComparison {
+        generated_text_match: tinyengine.generated_text == llama_cpp.generated_text,
+        prompt_token_count_match: tinyengine.prompt_tokens_used == llama_cpp.prompt_eval_tokens,
+        decode_eval_count_match: tinyengine.decode_eval_tokens == llama_cpp.eval_runs,
+        tiny_prompt_speed_ratio_vs_llama: ratio(
+            llama_cpp.prompt_eval_ms,
+            tinyengine.prompt_eval_ms,
+        ),
+        tiny_decode_speed_ratio_vs_llama: ratio(
+            tinyengine.decode_tokens_per_second,
+            llama_cpp.eval_tokens_per_second,
+        ),
+        tiny_total_wall_speed_ratio_vs_llama: ratio(llama_cpp.wall_ms, tinyengine.total_ms),
+    }
+}
+
+fn build_apple_to_apple_summary(runs: &[AppleToAppleRun]) -> AppleToAppleSummary {
+    AppleToAppleSummary {
+        measured_runs: runs.len(),
+        all_generated_text_match: runs.iter().all(|run| run.comparison.generated_text_match),
+        all_prompt_token_counts_match: runs
+            .iter()
+            .all(|run| run.comparison.prompt_token_count_match),
+        all_decode_eval_counts_match: runs
+            .iter()
+            .all(|run| run.comparison.decode_eval_count_match),
+        tiny_prompt_eval_ms_median: median(
+            runs.iter()
+                .map(|run| run.tinyengine.prompt_eval_ms)
+                .collect(),
+        ),
+        llama_prompt_eval_ms_median: median(
+            runs.iter()
+                .map(|run| run.llama_cpp.prompt_eval_ms)
+                .collect(),
+        ),
+        tiny_decode_tokens_per_second_median: median(
+            runs.iter()
+                .map(|run| run.tinyengine.decode_tokens_per_second)
+                .collect(),
+        ),
+        llama_decode_tokens_per_second_median: median(
+            runs.iter()
+                .map(|run| run.llama_cpp.eval_tokens_per_second)
+                .collect(),
+        ),
+        tiny_prompt_speed_ratio_vs_llama_median: median(
+            runs.iter()
+                .map(|run| run.comparison.tiny_prompt_speed_ratio_vs_llama)
+                .collect(),
+        ),
+        tiny_decode_speed_ratio_vs_llama_median: median(
+            runs.iter()
+                .map(|run| run.comparison.tiny_decode_speed_ratio_vs_llama)
+                .collect(),
+        ),
+        tiny_total_wall_speed_ratio_vs_llama_median: median(
+            runs.iter()
+                .map(|run| run.comparison.tiny_total_wall_speed_ratio_vs_llama)
+                .collect(),
+        ),
+    }
+}
+
+fn ratio(numerator: f64, denominator: f64) -> f64 {
+    if denominator > 0.0 {
+        numerator / denominator
+    } else {
+        0.0
+    }
+}
+
+fn median(mut values: Vec<f64>) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|left, right| left.total_cmp(right));
+    let middle = values.len() / 2;
+    if values.len() % 2 == 0 {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    }
 }
 
 async fn run_convert(args: ConvertArgs) -> anyhow::Result<()> {
@@ -747,6 +1189,103 @@ struct PrefillPhaseBenchmark {
     estimated_full_prefill_ms: f64,
     estimated_first_decode_ms: f64,
     estimated_ttft_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct AppleToAppleCompareReport {
+    benchmark: &'static str,
+    device: String,
+    llama_cpp_version: String,
+    models: AppleToAppleModels,
+    settings: AppleToAppleSettings,
+    summary: AppleToAppleSummary,
+    runs: Vec<AppleToAppleRun>,
+    note: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AppleToAppleModels {
+    tinyengine_hf_dir: PathBuf,
+    tinyengine_safetensors_bytes: Option<u64>,
+    llama_gguf: PathBuf,
+    llama_gguf_bytes: u64,
+    llama_bin: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+struct AppleToAppleSettings {
+    prompt: String,
+    formatted_prompt: String,
+    max_tokens: usize,
+    max_prompt_tokens: usize,
+    projection_backend: QwenProjectionBackend,
+    tinyengine_source: TinyEngineCompareSourceArg,
+    ctx_size: u32,
+    gpu_layers: i32,
+    seed: u64,
+    llama_warmup: bool,
+    runs: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct AppleToAppleRun {
+    run_index: usize,
+    tinyengine: QwenMlxRunResult,
+    llama_cpp: LlamaCompletionRun,
+    comparison: AppleToAppleRunComparison,
+}
+
+#[derive(Debug, Serialize)]
+struct LlamaCompletionRun {
+    argv: Vec<String>,
+    generated_text: String,
+    wall_ms: f64,
+    load_ms: f64,
+    prompt_eval_ms: f64,
+    prompt_eval_tokens: usize,
+    prompt_tokens_per_second: f64,
+    eval_ms: f64,
+    eval_runs: usize,
+    eval_tokens_per_second: f64,
+    total_ms: f64,
+    total_tokens: usize,
+    stderr_tail: String,
+}
+
+#[derive(Debug)]
+struct LlamaCompletionTimings {
+    load_ms: f64,
+    prompt_eval_ms: f64,
+    prompt_eval_tokens: usize,
+    eval_ms: f64,
+    eval_runs: usize,
+    total_ms: f64,
+    total_tokens: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct AppleToAppleRunComparison {
+    generated_text_match: bool,
+    prompt_token_count_match: bool,
+    decode_eval_count_match: bool,
+    tiny_prompt_speed_ratio_vs_llama: f64,
+    tiny_decode_speed_ratio_vs_llama: f64,
+    tiny_total_wall_speed_ratio_vs_llama: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct AppleToAppleSummary {
+    measured_runs: usize,
+    all_generated_text_match: bool,
+    all_prompt_token_counts_match: bool,
+    all_decode_eval_counts_match: bool,
+    tiny_prompt_eval_ms_median: f64,
+    llama_prompt_eval_ms_median: f64,
+    tiny_decode_tokens_per_second_median: f64,
+    llama_decode_tokens_per_second_median: f64,
+    tiny_prompt_speed_ratio_vs_llama_median: f64,
+    tiny_decode_speed_ratio_vs_llama_median: f64,
+    tiny_total_wall_speed_ratio_vs_llama_median: f64,
 }
 
 async fn run_models(args: SharedArgs) -> anyhow::Result<()> {

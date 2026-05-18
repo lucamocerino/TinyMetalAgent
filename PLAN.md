@@ -169,6 +169,7 @@ Benchmark in two stages:
 
 1. Cold-path benchmarks: include current one-shot Metal shader compilation and dispatch. These expose startup overhead and validate memory pressure.
 2. Steady-state benchmarks: reuse compiled pipeline states and buffers. These are the numbers that matter for decode throughput.
+3. Apple-to-apple optimization-loop benchmarks: compare TinyEngine against `llama-completion` on the same Qwen2.5 0.5B prompt and deterministic generation settings, saving JSON under `benchmarks/`. The primary baseline now uses the same GGUF Q4_0 file on both sides; TinyEngine maps GGUF Q4_0 blocks and GGUF Q8_0 `output.weight` onto Metal kernels, skips unnecessary prompt-token logits, reuses Metal buffers, batches prompt prefill, and keeps decode hidden/KV/scalar ops/attention plus Q8 argmax on Metal. Latest saved run: `benchmarks/qwen-gguf-q4_0-batched-prefill-gpu-decode-compare.json`.
 
 Initial Qwen 1.5B smoke shapes:
 

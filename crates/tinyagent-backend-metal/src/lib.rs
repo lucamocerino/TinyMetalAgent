@@ -10,7 +10,8 @@ use tinyagent_core::{
 
 mod qwen_mlx;
 pub use qwen_mlx::{
-    run_q4_affine_matvec_probe, run_qwen_mlx_end2end, Q4AffineMatVecProbeResult, QwenMlxRunConfig,
+    format_qwen_chat_prompt, run_q4_affine_matvec_probe, run_qwen_gguf_end2end,
+    run_qwen_mlx_end2end, Q4AffineMatVecProbeResult, QwenGgufRunConfig, QwenMlxRunConfig,
     QwenMlxRunResult, QwenProjectionBackend,
 };
 

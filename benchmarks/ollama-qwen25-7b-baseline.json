@@ -1,0 +1,40 @@
+{
+  "baseline": "ollama",
+  "model": "qwen2.5:7b",
+  "comparison_note": "Directional baseline only: Ollama qwen2.5:7b is much larger than TinyEngine's Qwen2.5-0.5B-Instruct-4bit MLX model.",
+  "prompt": "Rispondi in italiano con tre parole: cosa sei?",
+  "options": {
+    "num_predict": 4,
+    "temperature": 0,
+    "num_ctx": 512
+  },
+  "cold_run": {
+    "response": "Sono un assist",
+    "prompt_eval_count": 42,
+    "eval_count": 4,
+    "prompt_eval_ms": 1560.864667,
+    "eval_ms": 322.873042,
+    "total_ms_api": 21179.620166,
+    "wall_ms": 21227.766708,
+    "decode_tok_s": 12.388770444328394
+  },
+  "warm_run": {
+    "response": "Sono un assist",
+    "prompt_eval_count": 42,
+    "eval_count": 4,
+    "prompt_eval_ms": 107.3035,
+    "eval_ms": 226.257625,
+    "total_ms_api": 481.795458,
+    "wall_ms": 526.920041,
+    "decode_tok_s": 17.67896220072141
+  },
+  "tinyengine_reference_from_current_session": {
+    "model": "Qwen2.5-0.5B-Instruct-4bit MLX",
+    "projection_backend": "metal",
+    "prompt_tokens_capped": 10,
+    "generated_tokens": 4,
+    "eval_ms": 713,
+    "ttft_ms": 489,
+    "decode_tok_s": 18
+  }
+}
