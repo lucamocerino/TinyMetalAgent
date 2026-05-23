@@ -4,96 +4,80 @@ Phase 1 is **TinyEngine**: a from-scratch local Metal inference engine for Qwen-
 
 Phase 2 is **TinyAgent**: the lightweight agent layer on top of the engine, with local tools, sessions, and memory.
 
-The goal is to democratize local AI by making open-source models simple, fast, and lean. No cloud providers, no Python runtime, no Electron app, no heavyweight agent framework.
+The goal is to democratize local AI by making open-source models simple, fast, and lean. No cloud providers, no Electron app, no heavyweight agent framework; Python is only a thin binding/tooling layer over the C ABI.
 
 ## Status
 
-Early scaffold. Custom Metal is the product path. `llama.cpp` is kept only as an optional **oracle backend** to verify kernels and logits while TinyEngine is built.
+TinyEngine is now C-first, with a thin Python `ctypes` binding for inspection, tests, and tooling. Custom C/Metal is the product path. `llama.cpp` is kept only as an optional **oracle backend** to verify tokenization, generated text, and performance while TinyEngine is built.
+
+## Dependencies
+
+The product runtime keeps dependencies minimal:
+
+| Surface | Required dependencies |
+| --- | --- |
+| C runtime and CLI tools | C compiler, C++/Objective-C++ compiler on Darwin, system `libm`, Apple Foundation/Metal frameworks on Darwin |
+| Python binding | Python 3 standard library only (`ctypes`) |
+| C tests | Python 3 standard library for generated guard fixtures |
+| Oracle/benchmark/autotune | Optional external `llama-completion` binary and local GGUF model |
+
+No Rust, Cargo, pip packages, NumPy, PyTorch, Electron, or cloud SDKs are required.
 
 ## Current commands
 
-Probe the local Metal device:
-This also runs a tiny custom Metal `vector_add` kernel and an `f16` matmul kernel with CPU parity.
+Build the C ABI runtime and Python binding:
 
 ```bash
-cargo run -p tinyagent -- engine probe
+make -C c clean all
+make -C c test
+c/build/te_smoke ../models/qwen2.5-0.5b-instruct-q4_0.gguf
+make -C c oracle
+make -C c benchmark
+PYTHONPATH=python TINYENGINE_LIBRARY=$PWD/c/build/libtinyengine.dylib python3 - <<'PY'
+from tinyengine import Model, capabilities, detect_arch, make_kernel_plan
+path = "../models/qwen2.5-0.5b-instruct-q4_0.gguf"
+print(detect_arch())
+print(make_kernel_plan())
+print(capabilities())
+with Model(path) as model:
+    print(model.info())
+    print(model.tensor_info("token_embd.weight"))
+    print(model.tensor_info("output.weight"))
+    print(len(model.dequantize_row("token_embd.weight", 0)))
+PY
 ```
 
-Run the current Qwen-size cold benchmark:
+`make -C c all` builds only the product runtime library and C CLI tools. Python and `llama.cpp`
+are optional development surfaces used by `test`, `oracle`, `benchmark`, and binding examples.
 
-```bash
-cargo run -p tinyagent -- engine bench
-cargo run -p tinyagent -- engine bench --hot --iterations 25
-cargo run -p tinyagent -- engine phase-bench \
-  --hf-dir ../mlx-qwen-lab/models/Qwen2.5-0.5B-Instruct-4bit \
-  --out benchmarks/qwen-phase-benchmark.json
-cargo run --release -p tinyagent -- engine qwen-run \
-  --hf-dir ../mlx-qwen-lab/models/Qwen2.5-0.5B-Instruct-4bit \
-  --prompt "Rispondi in italiano con tre parole: cosa sei?" \
-  --max-prompt-tokens 10 \
-  --max-tokens 4 \
-  --projection-backend metal
-cargo run --release -p tinyagent -- engine compare \
-  --tinyengine-source gguf \
-  --hf-dir ../mlx-qwen-lab/models/Qwen2.5-0.5B-Instruct-4bit \
-  --gguf ../models/qwen2.5-0.5b-instruct-q4_0.gguf \
-  --llama-bin ../tools/llama.cpp-b9219/current/llama-completion \
-  --prompt "Rispondi in italiano con tre parole: cosa sei?" \
-  --max-prompt-tokens 512 \
-  --max-tokens 4 \
-  --runs 3 \
-  --out benchmarks/qwen-gguf-q4_0-batched-prefill-gpu-decode-compare.json
-```
+The C ABI memory-maps GGUF v2/v3 files, parses metadata, the tensor directory, and GGUF tokenizer
+token/merge arrays, exposes Qwen model/tensor/tokenizer descriptors, and runs a real Qwen decode
+path with KV cache. CPU reference ops cover F32 reads, Q4_0/Q8_0 row dequantization, rank-2 matvec,
+RMSNorm, RoPE, attention decode, SwiGLU, residual add, and argmax.
 
-`engine phase-bench` reads a real Hugging Face/MLX Qwen directory and writes per-phase prefill
-and synthetic TTFT estimates until full end-to-end TinyEngine inference is wired. Decode estimates
-use the dedicated Metal `matvec_f16_f32` path instead of the generic `m=1` tiled matmul baseline.
-`engine qwen-run` executes the full Qwen2.5 graph over real MLX 4-bit weights. With
-`--projection-backend metal`, q4 affine projections use reusable Metal pipelines and GPU-resident
-weight buffers. Prompt prefill is batched across tokens; decode keeps hidden state, KV cache,
-RMSNorm, RoPE, attention, residuals, SwiGLU, Q8 `lm_head`, and argmax on Metal where the GGUF path
-supports it.
-`engine compare` runs a repeatable optimization-loop benchmark against `llama-completion` using the
-same Qwen2.5 0.5B prompt, deterministic generation settings, and prompt token count. It reports
-load, prompt/TTFT, decode, wall-clock, output parity, and speed ratios as JSON. With
-`--tinyengine-source gguf`, TinyEngine and llama.cpp use the same GGUF file and quantized tensors.
-The first same-quant baseline is Qwen2.5 0.5B GGUF Q4_0; TinyEngine maps Q4_0 blocks and GGUF Q8_0
-`output.weight` onto Metal kernels. Prompt logits are skipped for intermediate prompt tokens, so
-only the last prompt token and decode steps project through `lm_head`. The current Metal path also
-reuses input, linear-bias, and output buffers across projections, uses a batch-tiled Q4 prefill
-kernel, and uses a row-tiled Q4 decode kernel. The latest 3-run same-quant benchmark is
-`benchmarks/qwen-gguf-q4_0-batched-prefill-gpu-decode-compare.json`: TinyEngine median prompt/TTFT
-is 303.5 ms and decode is 32.72 tok/s, while llama.cpp is 48.25 ms and 121.26 tok/s.
+Every C kernel iteration should add or update `make -C c test`, which checks tokenizer BPE merge
+behavior, Q4_0 nibble layout, Q8_0 signed bytes, matvec orientation, RMSNorm, RoPE, attention
+decode, SwiGLU, residual add, and argmax on a tiny synthetic GGUF fixture. Large Q4_0/Q8_0 matvecs
+use the experimental Metal backend by default on Darwin; set `TINYENGINE_METAL_MATVEC=0` to force
+the CPU reference path.
 
-Create a metadata-only `.tma` package scaffold from a local Hugging Face or GGUF source:
-For Hugging Face directories, `tokenizer.json` is copied and Qwen dimensions are read from `config.json` when present.
+`make -C c oracle` runs the C generation executable against `llama-completion` on the real Qwen2.5
+GGUF and deterministic prompt; it also verifies that the C Qwen chat prompt token count matches
+llama.cpp. Override `GGUF=...` and `LLAMA_BIN=...` when those live outside the default local paths.
+The C path is correctness-comparable but still far slower than llama.cpp until more of the hot path
+is batched/fused on Metal; `llama.cpp` remains the external oracle for correctness and performance
+checks.
 
-```bash
-cargo run -p tinyagent -- convert hf ./models/qwen-hf --out ./models/qwen.tma
-cargo run -p tinyagent -- convert gguf ./models/qwen.gguf --out ./models/qwen.tma
-cargo run -p tinyagent -- engine inspect --package ./models/qwen.tma
-```
+`make -C c benchmark` repeats the same deterministic prompt, writes
+`benchmarks/c-qwen2.5-0.5b-q4_0-vs-llama.json`, and records TinyEngine C timings, llama.cpp prompt
+and decode timings, text parity, and speed ratios for the optimization loop. The current real C
+reference benchmark is correctness-comparable but not performance-comparable yet: TinyEngine C
+median total is 2601.02 ms and 1.55 tok/s, while llama.cpp total is 71.32 ms with 123.76 tok/s
+decode on the same prompt. The next optimization target is moving Q4/Q8 matvec, lm_head, and decode
+state to the Metal backend.
 
-Inspect the default custom Metal model configuration:
-
-```bash
-cargo run -p tinyagent -- models
-```
-
-Use the llama oracle only for reference checks:
-
-```bash
-cargo run -p tinyagent -- chat \
-  --backend llama \
-  --gguf ./models/qwen.gguf \
-  --llama-server-bin /path/to/llama-server \
-  "ciao"
-```
-
-Development stub:
-
-```bash
-cargo run -p tinyagent -- chat --backend stub "ciao"
-```
+Set `TINYENGINE_WORKLOAD=short|long|decode|auto` to make workload-specific kernel policy explicit.
+`make -C c benchmark-long` sets `TINYENGINE_WORKLOAD=long`; `autotune` sets `short` or `long` per
+workload before testing candidate kernel profiles.
 
 See `PLAN.md` for the implementation roadmap.

@@ -1,8 +1,7 @@
-/target
+/c/build
 /.idea
 /.vscode
 .DS_Store
 *.log
 *.gguf
 models/*.gguf
-
