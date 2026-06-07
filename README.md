@@ -151,29 +151,53 @@ bin/tinyagent --root /path/to/project --yes "Create fizzbuzz.py and run python3 
 bin/tinyagent --ask "Explain how a linked list works"   # chat-only, no tools
 ```
 
-Useful flags: `--root` (workspace, default cwd), `--yes` (auto-approve tools),
-`--ask` (chat-only, never use tools), `--dry-run` (never execute write/exec),
-`--no-network`, `--max-steps`, `--ctx`, `--daemon`, `--verbose`, `--resume`/`--save`
-(persist a session). `--ctx` defaults to the detected hardware recommendation, and
-`--daemon` reuses a persistent local model process across CLI invocations. In the REPL,
-type `/help` for commands (`/ask`, `/tools`, `/context`, `/diff`, `/clear`,
-`/compact`, `/approve auto|ask`, `/save`, `/exit`), `?` for quick help, `!cmd` to run
-a shell command in the workspace, or mention files with `@path`.
-Slash commands autocomplete with Tab in terminals that support readline; typing `/`
-and pressing Enter lists the available commands. File mentions autocomplete with Tab
-after `@`.
 Add `bin/` to your `PATH` (or symlink `bin/tinyagent`) to type just `tinyagent`.
 
-The engine decodes with low-temperature top-k sampling (default `temperature=0.3`,
-`top_k=40`) to avoid greedy repetition loops while keeping tool-call JSON intact;
-override via `TINYENGINE_TEMPERATURE`, `TINYENGINE_TOP_K`, `TINYENGINE_SEED`.
+### CLI options
 
-Chat/ask answers stream to the terminal token-by-token as the model decodes them,
-so you get live output instead of waiting for the whole reply.
+| Option | Purpose |
+| --- | --- |
+| `--root PATH` | Workspace root. Defaults to the current directory. |
+| `--yes` | Auto-approve tool calls. Useful for trusted local experiments. |
+| `--ask` | Chat-only mode. The agent answers without using tools. |
+| `--dry-run` | Simulate write/exec tools without changing files or running commands. |
+| `--no-network` | Disable network tools. |
+| `--max-steps N` | Limit the number of agent/tool loop steps. |
+| `--ctx N` | Model context tokens. Defaults to the detected hardware recommendation. |
+| `--daemon` | Reuse a persistent local model process across CLI invocations. |
+| `--verbose` | Show model load, prompt rendering, steps, tool args/results, and timings. |
+| `--resume FILE` / `--save FILE` | Resume or persist a local session JSON file. |
 
-By default the terminal UI keeps output concise. Use `--verbose` to show model
-load/daemon reuse, context rendering, agent steps, full tool arguments/results, and
-model/tool timings when debugging.
+### REPL commands and shortcuts
+
+| Input | Action |
+| --- | --- |
+| `/help` | Show full interactive help. |
+| `/ask [question]` | Ask a one-off chat-only question, or toggle persistent chat-only mode with no argument. |
+| `/tools` | List available tools. |
+| `/context` | Show context/token usage. |
+| `/diff` | Show a Git diff summary for the workspace. |
+| `/clear` | Reset the conversation. |
+| `/compact` | Summarize history to free context. |
+| `/approve auto` / `/approve ask` | Change approval mode. |
+| `/save FILE` | Save the session. |
+| `/exit` | Exit the REPL. |
+| `?` | Show quick help. |
+| `!cmd` | Run a shell command in the workspace. |
+| `@path` | Attach a file or directory listing to the next prompt. |
+
+Slash commands autocomplete with Tab in terminals that support readline. Typing `/`
+and pressing Enter lists the available commands. File mentions autocomplete with Tab
+after `@`.
+
+### Runtime behavior
+
+- Chat/ask answers stream token-by-token, so you see output while the model decodes.
+- The terminal UI is concise by default; use `--verbose` for debugging details.
+- Sampling defaults to `temperature=0.3` and `top_k=40` to avoid greedy repetition while
+  keeping tool-call JSON stable.
+- Override sampling with `TINYENGINE_TEMPERATURE`, `TINYENGINE_TOP_K`, and
+  `TINYENGINE_SEED`.
 
 ## Model setup
 
