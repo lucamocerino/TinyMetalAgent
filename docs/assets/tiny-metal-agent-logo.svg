@@ -1,79 +1,86 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 320" role="img" aria-labelledby="title desc">
   <title id="title">TinyMetalAgent logo</title>
-  <desc id="desc">A compact metallic chip with a terminal prompt and student-learning spark beside the TinyMetalAgent wordmark.</desc>
+  <desc id="desc">A friendly metallic robot tutor with glowing eyes, a small book, and the TinyMetalAgent wordmark.</desc>
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#111827"/>
-      <stop offset="0.48" stop-color="#172033"/>
+      <stop offset="0.5" stop-color="#172033"/>
       <stop offset="1" stop-color="#0b1020"/>
     </linearGradient>
     <linearGradient id="metal" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#e5e7eb"/>
-      <stop offset="0.28" stop-color="#94a3b8"/>
-      <stop offset="0.55" stop-color="#f8fafc"/>
-      <stop offset="0.82" stop-color="#64748b"/>
-      <stop offset="1" stop-color="#cbd5e1"/>
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="0.25" stop-color="#cbd5e1"/>
+      <stop offset="0.55" stop-color="#64748b"/>
+      <stop offset="0.78" stop-color="#e2e8f0"/>
+      <stop offset="1" stop-color="#94a3b8"/>
+    </linearGradient>
+    <linearGradient id="darkMetal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#475569"/>
+      <stop offset="1" stop-color="#0f172a"/>
     </linearGradient>
     <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#22d3ee"/>
       <stop offset="0.5" stop-color="#38bdf8"/>
       <stop offset="1" stop-color="#a78bfa"/>
     </linearGradient>
-    <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
-      <feGaussianBlur stdDeviation="10" result="blur"/>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
       <feMerge>
         <feMergeNode in="blur"/>
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="12" flood-color="#020617" flood-opacity="0.45"/>
+    </filter>
   </defs>
 
   <rect width="960" height="320" rx="44" fill="url(#background)"/>
-  <circle cx="805" cy="65" r="120" fill="#2563eb" opacity="0.12"/>
-  <circle cx="135" cy="260" r="150" fill="#14b8a6" opacity="0.10"/>
+  <circle cx="120" cy="255" r="145" fill="#14b8a6" opacity="0.10"/>
+  <circle cx="830" cy="78" r="126" fill="#2563eb" opacity="0.12"/>
 
-  <g transform="translate(82 62)">
-    <rect x="34" y="34" width="172" height="172" rx="30" fill="#020617" stroke="url(#metal)" stroke-width="5"/>
-    <rect x="58" y="58" width="124" height="124" rx="22" fill="#0f172a" stroke="#334155" stroke-width="2"/>
-    <path d="M86 112l24 24-24 24" fill="none" stroke="url(#accent)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M126 164h44" fill="none" stroke="#f8fafc" stroke-width="10" stroke-linecap="round"/>
+  <g transform="translate(76 38)" filter="url(#shadow)">
+    <path d="M126 26v32" stroke="#94a3b8" stroke-width="8" stroke-linecap="round"/>
+    <circle cx="126" cy="18" r="12" fill="url(#accent)" filter="url(#glow)"/>
 
-    <g stroke="url(#metal)" stroke-width="8" stroke-linecap="round">
-      <path d="M32 72H8"/>
-      <path d="M32 112H8"/>
-      <path d="M32 152H8"/>
-      <path d="M32 192H8"/>
-      <path d="M232 72h-24"/>
-      <path d="M232 112h-24"/>
-      <path d="M232 152h-24"/>
-      <path d="M232 192h-24"/>
-      <path d="M72 32V8"/>
-      <path d="M112 32V8"/>
-      <path d="M152 32V8"/>
-      <path d="M192 32V8"/>
-      <path d="M72 232v-24"/>
-      <path d="M112 232v-24"/>
-      <path d="M152 232v-24"/>
-      <path d="M192 232v-24"/>
+    <rect x="42" y="56" width="168" height="126" rx="34" fill="url(#metal)" stroke="#e2e8f0" stroke-width="3"/>
+    <rect x="58" y="74" width="136" height="90" rx="26" fill="#0f172a" stroke="#334155" stroke-width="3"/>
+    <circle cx="102" cy="116" r="13" fill="#67e8f9" filter="url(#glow)"/>
+    <circle cx="150" cy="116" r="13" fill="#67e8f9" filter="url(#glow)"/>
+    <path d="M102 146c14 12 34 12 48 0" fill="none" stroke="#c4b5fd" stroke-width="6" stroke-linecap="round"/>
+
+    <rect x="73" y="184" width="106" height="72" rx="24" fill="url(#darkMetal)" stroke="url(#metal)" stroke-width="4"/>
+    <path d="M66 204l-28 26" stroke="#94a3b8" stroke-width="12" stroke-linecap="round"/>
+    <path d="M186 204l28 26" stroke="#94a3b8" stroke-width="12" stroke-linecap="round"/>
+    <circle cx="36" cy="232" r="13" fill="url(#metal)"/>
+    <circle cx="216" cy="232" r="13" fill="url(#metal)"/>
+
+    <path d="M91 262v20" stroke="#94a3b8" stroke-width="12" stroke-linecap="round"/>
+    <path d="M161 262v20" stroke="#94a3b8" stroke-width="12" stroke-linecap="round"/>
+    <path d="M72 286h38" stroke="#cbd5e1" stroke-width="10" stroke-linecap="round"/>
+    <path d="M142 286h38" stroke="#cbd5e1" stroke-width="10" stroke-linecap="round"/>
+
+    <g transform="translate(90 203)">
+      <path d="M0 0h37c9 0 16 7 16 16v35H16C7 51 0 44 0 35z" fill="#1e293b" stroke="#38bdf8" stroke-width="3"/>
+      <path d="M53 16c0-9 7-16 16-16h37v35c0 9-7 16-16 16H53z" fill="#1e293b" stroke="#a78bfa" stroke-width="3"/>
+      <path d="M53 16v35" stroke="#e2e8f0" stroke-width="3"/>
+      <path d="M17 17h23M17 29h18M70 17h22M70 29h16" stroke="#cbd5e1" stroke-width="3" stroke-linecap="round"/>
     </g>
 
-    <path d="M194 26l10 22 24 4-18 17 4 24-20-12-21 12 5-24-18-17 24-4z" fill="url(#accent)" filter="url(#softGlow)"/>
-    <path d="M54 210c26 20 92 20 118 0" fill="none" stroke="#38bdf8" stroke-width="5" stroke-linecap="round" opacity="0.7"/>
+    <path d="M202 42l7 16 17 3-13 12 3 17-14-8-15 8 4-17-13-12 17-3z" fill="url(#accent)" filter="url(#glow)"/>
   </g>
 
-  <g transform="translate(335 92)">
-    <text x="0" y="0" fill="#f8fafc" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="60" font-weight="800" letter-spacing="-2">
+  <g transform="translate(346 90)">
+    <text x="0" y="0" fill="#f8fafc" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="60" font-weight="850" letter-spacing="-2">
       TinyMetalAgent
     </text>
-    <text x="3" y="54" fill="#93c5fd" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="600">
+    <text x="3" y="54" fill="#93c5fd" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="650">
       local AI practice for students
     </text>
     <g transform="translate(4 92)">
-      <rect x="0" y="0" width="440" height="54" rx="16" fill="#020617" stroke="#334155"/>
-      <text x="24" y="36" fill="#67e8f9" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="24" font-weight="700">&gt; learn</text>
-      <text x="135" y="36" fill="#f8fafc" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="24">code</text>
-      <text x="205" y="36" fill="#a78bfa" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="24">test</text>
-      <text x="280" y="36" fill="#cbd5e1" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="24">locally</text>
+      <rect x="0" y="0" width="454" height="56" rx="18" fill="#020617" stroke="#334155"/>
+      <circle cx="32" cy="28" r="9" fill="#22d3ee"/>
+      <text x="56" y="36" fill="#e5e7eb" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="23">learn · build · test · locally</text>
     </g>
   </g>
 </svg>
