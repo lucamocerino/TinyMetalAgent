@@ -205,6 +205,28 @@ workload before testing candidate kernel profiles.
 
 See `PLAN.md` for the implementation roadmap.
 
+## Kernel and runtime optimization techniques
+
+TinyEngine is built as a learning-oriented inference engine, but it still uses several practical optimization
+techniques to make local inference feasible on resource-constrained Apple Silicon machines:
+
+| Area | Techniques used |
+| --- | --- |
+| Quantized math | GGUF `Q4_0` and `Q8_0` tensor support, block-wise dequantization, optimized Q4/Q8 matvec and matmul paths, and special lm_head projection kernels. |
+| Metal acceleration | Hand-written Metal compute kernels for quantized matvec/matmul, RMSNorm, RoPE, attention, SwiGLU/MLP, residual add, and argmax-style projection. |
+| Kernel fusion | Fused QKV projection paths, fused gate/up SwiGLU MLP paths, fused FFN down-projection plus residual add, and fused decode/prefill layer dispatch paths where supported. |
+| Prefill vs decode policy | `TINYENGINE_WORKLOAD=short|long|decode|auto` selects different kernel regimes for short prompts, long prefill, and token-by-token decode instead of relying on one hidden default. |
+| Batched prefill | Prompt tokens can be processed in batches so long prompts do not always fall back to purely token-by-token execution. |
+| Memory movement | The runtime memory-maps GGUF weights, uses Metal buffers over mapped model data where possible, warms model pages for first-use latency, and keeps selected KV/cache buffers resident for longer workloads. |
+| Precision tradeoffs | Some intermediate FFN/KV paths can use half-precision storage to reduce memory bandwidth and scratch-buffer pressure. |
+| Command-buffer strategy | Several paths reduce per-layer dispatch overhead by grouping work into fused layer or all-layer command-buffer flows. |
+| Profiling and autotune | `TINYENGINE_METAL_PROFILE`, benchmark JSON output, and `make -C c autotune`/`autotune-quick` compare kernel profiles such as matmul on/off, FlashAttention on/off, fused FFN options, argmax CPU/GPU, and QKV fusion. |
+| CPU reference parity | Every optimized path is backed by CPU/reference checks in `make -C c test`, including tokenizer behavior, quant layout, matvec orientation, RMSNorm, RoPE, attention decode, SwiGLU, residual add, and argmax. |
+
+These optimizations are intentionally transparent: most switches are exposed through environment variables so
+students and contributors can observe tradeoffs, reproduce benchmark runs, and learn how kernel choices affect
+latency, throughput, memory pressure, and correctness.
+
 ## Model setup
 
 Model weights are not included in this repository. Place a trusted Qwen-compatible GGUF at one of
