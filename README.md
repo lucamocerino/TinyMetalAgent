@@ -117,6 +117,10 @@ See `PLAN.md` for the implementation roadmap.
 auto-discovers a local Qwen GGUF, so the simplest possible invocation just drops you
 into the interactive chat:
 
+<p align="center">
+  <img src="docs/assets/tinyagent-demo.svg" alt="TinyAgent terminal demo creating a Matrix class and tests" width="760">
+</p>
+
 ```bash
 bin/tinyagent                       # interactive REPL in the current directory
 ```

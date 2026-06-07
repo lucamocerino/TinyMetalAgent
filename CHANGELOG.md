@@ -19,3 +19,4 @@ This project follows semantic versioning once formal releases begin. Before `1.0
 - Added modern terminal-agent REPL affordances: `?` quick help, `!` shell escape, `@file` mentions, `/context`, and `/diff`.
 - Added a deterministic Matrix integration test that drives real agent tools to create a pure-Python Matrix class, write unittest coverage, and run it.
 - Added an original SVG repository logo focused on local AI learning for students.
+- Added an SVG terminal demo screen to the README.
