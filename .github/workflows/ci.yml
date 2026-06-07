@@ -77,13 +77,23 @@ jobs:
           scripts/prepare_qwen_model.sh --dry-run --target coder
 
       - name: Validate pyproject syntax
-        run: python3 - <<'PY'
+        run: |
+          python3 - <<'PY'
           import pathlib
-          import tomllib
+          try:
+              import tomllib
+          except ModuleNotFoundError:
+              tomllib = None
 
-          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
-          project = data["project"]
-          assert project["name"] == "tiny-metal-agent"
-          assert project["version"]
-          assert "tinyagent" in project["scripts"]
+          text = pathlib.Path("pyproject.toml").read_text()
+          if tomllib is None:
+              assert 'name = "tiny-metal-agent"' in text
+              assert "version =" in text
+              assert 'tinyagent = "tinyagent.cli:main"' in text
+          else:
+              data = tomllib.loads(text)
+              project = data["project"]
+              assert project["name"] == "tiny-metal-agent"
+              assert project["version"]
+              assert "tinyagent" in project["scripts"]
           PY
