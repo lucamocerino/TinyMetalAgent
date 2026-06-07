@@ -2,129 +2,24 @@
   <img src="docs/assets/tiny-metal-agent-logo.png" alt="TinyMetalAgent logo" width="420">
 </p>
 
-# TinyEngine / TinyAgent
+# TinyMetalAgent
 
-Phase 1 is **TinyEngine**: a from-scratch local Metal inference engine for Qwen-class open-source models that can run on consumer Apple Silicon Macs with 8 GB of unified memory.
+TinyMetalAgent is a local, student-focused AI coding agent for educational programming projects. It runs a
+Qwen-compatible open-source model locally through a custom C/Metal inference engine, with a thin Python terminal
+agent on top.
 
-Phase 2 is **TinyAgent**: the lightweight agent layer on top of the engine, with local tools, sessions, and memory.
+The project has two layers:
 
-The goal is to democratize local AI by making open-source models simple, fast, and lean. No cloud providers, no Electron app, no heavyweight agent framework; Python is only a thin binding/tooling layer over the C ABI.
-
-## Mission
-
-TinyMetalAgent exists to help students practice with local agentic programming tools on educational projects.
-The project is built around a simple idea: learners should be able to experiment with an AI coding assistant
-locally, on normal consumer hardware, while studying programming languages, algorithms, tests, debugging,
-and software engineering workflows.
-
-The long-term mission is educational first. TinyAgent should help students build small school-style projects,
-ask programming questions, inspect files, create exercises, write tests, and learn by seeing what an agent is
-doing step by step. TinyEngine keeps the inference stack local and inspectable so learners can also understand
-the lower-level pieces: model loading, tokenization, quantized kernels, Apple Silicon GPU execution, terminal
-agent UX, safety boundaries, and repeatable benchmarking.
-
-This repository is intentionally small and dependency-light so students and contributors can read the code,
-modify it, and experiment with the full stack without needing cloud model APIs or heavyweight desktop apps.
-
-## Status
-
-TinyEngine is now C-first, with a thin Python `ctypes` binding for inspection, tests, and tooling. Custom C/Metal is the product path. `llama.cpp` is kept only as an optional **oracle backend** to verify tokenization, generated text, and performance while TinyEngine is built.
-
-This is an alpha-stage project. It is useful for experimentation, learning, and early local-agent workflows,
-but it is not yet a polished replacement for mature inference engines or commercial coding agents.
-
-## Dependencies
-
-The product runtime keeps dependencies minimal:
-
-| Surface | Required dependencies |
+| Layer | Role |
 | --- | --- |
-| C runtime and CLI tools | C compiler, C++/Objective-C++ compiler on Darwin, system `libm`, Apple Foundation/Metal frameworks on Darwin |
-| Python binding | Python 3 standard library only (`ctypes`) |
-| C tests | Python 3 standard library for generated guard fixtures |
-| Oracle/benchmark/autotune | Optional external `llama-completion` binary and local GGUF model |
+| **TinyAgent** | The local terminal coding agent for student projects, tools, sessions, and REPL UX. |
+| **TinyEngine** | The C/Metal inference engine that loads Qwen-compatible GGUF models and runs local decode. |
 
-No Rust, Cargo, pip packages, NumPy, PyTorch, Electron, or cloud SDKs are required.
+## TinyMetalAgent local coding agent
 
-## Current commands
-
-One-command local setup:
-
-```bash
-./install.sh              # build, test, install package, verify CLI
-./install.sh --with-model # also download the default local Qwen GGUF
-```
-
-Model download is opt-in because model files are large and governed by their own upstream terms.
-
-Build the C ABI runtime and Python binding:
-
-```bash
-make -C c clean all
-make -C c test
-c/build/te_smoke ../models/qwen2.5-coder-3b-instruct-q4_0-te.gguf
-make -C c oracle
-make -C c benchmark
-PYTHONPATH=python TINYENGINE_LIBRARY=$PWD/c/build/libtinyengine.dylib python3 - <<'PY'
-from tinyengine import Model, capabilities, detect_arch, make_kernel_plan
-path = "../models/qwen2.5-coder-3b-instruct-q4_0-te.gguf"
-print(detect_arch())
-print(make_kernel_plan())
-print(capabilities())
-with Model(path) as model:
-    print(model.info())
-    print(model.tensor_info("token_embd.weight"))
-    print(model.tensor_info("output.weight"))
-    print(len(model.dequantize_row("token_embd.weight", 0)))
-PY
-```
-
-Install the Python package and CLI in editable mode:
-
-```bash
-python3 -m pip install -e .
-TINYENGINE_LIBRARY=$PWD/c/build/libtinyengine.dylib python3 -m tinyagent --help
-```
-
-`make -C c all` builds only the product runtime library and C CLI tools. Python and `llama.cpp`
-are optional development surfaces used by `test`, `oracle`, `benchmark`, and binding examples.
-
-The C ABI memory-maps GGUF v2/v3 files, parses metadata, the tensor directory, and GGUF tokenizer
-token/merge arrays, exposes Qwen model/tensor/tokenizer descriptors, and runs a real Qwen decode
-path with KV cache. CPU reference ops cover F32 reads, Q4_0/Q8_0 row dequantization, rank-2 matvec,
-RMSNorm, RoPE, attention decode, SwiGLU, residual add, and argmax.
-
-Every C kernel iteration should add or update `make -C c test`, which checks tokenizer BPE merge
-behavior, Q4_0 nibble layout, Q8_0 signed bytes, matvec orientation, RMSNorm, RoPE, attention
-decode, SwiGLU, residual add, and argmax on a tiny synthetic GGUF fixture. Large Q4_0/Q8_0 matvecs
-use the experimental Metal backend by default on Darwin; set `TINYENGINE_METAL_MATVEC=0` to force
-the CPU reference path.
-
-`make -C c oracle` runs the C generation executable against `llama-completion` on the real Qwen2.5
-GGUF and deterministic prompt; it also verifies that the C Qwen chat prompt token count matches
-llama.cpp. Override `GGUF=...` and `LLAMA_BIN=...` when those live outside the default local paths.
-The C path is correctness-comparable but still far slower than llama.cpp until more of the hot path
-is batched/fused on Metal; `llama.cpp` remains the external oracle for correctness and performance
-checks.
-
-`make -C c benchmark` repeats the same deterministic prompt, writes
-`benchmarks/c-qwen2.5-coder-3b-q4_0-te-vs-llama.json`, and records TinyEngine C timings,
-llama.cpp prompt and decode timings, text parity, and speed ratios for the optimization loop.
-The release benchmark target is `qwen2.5-coder-3b-instruct-q4_0-te.gguf`; the next optimization
-target is reducing cold-load latency and improving the Q4/Q8/lm_head/decode Metal hot path.
-
-Set `TINYENGINE_WORKLOAD=short|long|decode|auto` to make workload-specific kernel policy explicit.
-`make -C c benchmark-long` sets `TINYENGINE_WORKLOAD=long`; `autotune` sets `short` or `long` per
-workload before testing candidate kernel profiles.
-
-See `PLAN.md` for the implementation roadmap.
-
-## tinyagent (local coding agent)
-
-`tinyagent` is a terminal coding agent that runs the LLM
-100% locally through TinyEngine. The `bin/tinyagent` launcher sets `PYTHONPATH` and
-auto-discovers a local Qwen GGUF, so the simplest possible invocation just drops you
-into the interactive chat:
+`tinyagent` is the terminal coding agent included in this repository. It runs 100% locally through TinyEngine.
+The `bin/tinyagent` launcher sets `PYTHONPATH` and auto-discovers a local Qwen GGUF, so the simplest possible
+invocation just drops you into the interactive chat:
 
 <p align="center">
   <img src="docs/assets/tinyagent-demo.svg" alt="TinyAgent terminal demo creating a Matrix class and tests" width="760">
@@ -198,6 +93,117 @@ after `@`.
   keeping tool-call JSON stable.
 - Override sampling with `TINYENGINE_TEMPERATURE`, `TINYENGINE_TOP_K`, and
   `TINYENGINE_SEED`.
+
+## Mission
+
+TinyMetalAgent exists to help students practice with local agentic programming tools on educational projects.
+The project is built around a simple idea: learners should be able to experiment with an AI coding assistant
+locally, on normal consumer hardware, while studying programming languages, algorithms, tests, debugging,
+and software engineering workflows.
+
+The long-term mission is educational first. TinyAgent should help students build small school-style projects,
+ask programming questions, inspect files, create exercises, write tests, and learn by seeing what an agent is
+doing step by step. TinyEngine keeps the inference stack local and inspectable so learners can also understand
+the lower-level pieces: model loading, tokenization, quantized kernels, Apple Silicon GPU execution, terminal
+agent UX, safety boundaries, and repeatable benchmarking.
+
+This repository is intentionally small and dependency-light so students and contributors can read the code,
+modify it, and experiment with the full stack without needing cloud model APIs or heavyweight desktop apps.
+
+## Status
+
+TinyEngine is now C-first, with a thin Python `ctypes` binding for inspection, tests, and tooling. Custom C/Metal is the product path. `llama.cpp` is kept only as an optional **oracle backend** to verify tokenization, generated text, and performance while TinyEngine is built.
+
+This is an alpha-stage project. It is useful for experimentation, learning, and early local-agent workflows,
+but it is not yet a polished replacement for mature inference engines or commercial coding agents.
+
+## Dependencies
+
+The product runtime keeps dependencies minimal:
+
+| Surface | Required dependencies |
+| --- | --- |
+| C runtime and CLI tools | C compiler, C++/Objective-C++ compiler on Darwin, system `libm`, Apple Foundation/Metal frameworks on Darwin |
+| Python binding | Python 3 standard library only (`ctypes`) |
+| C tests | Python 3 standard library for generated guard fixtures |
+| Oracle/benchmark/autotune | Optional external `llama-completion` binary and local GGUF model |
+
+No Rust, Cargo, pip packages, NumPy, PyTorch, Electron, or cloud SDKs are required.
+
+## Installation
+
+One-command local setup for most users:
+
+```bash
+./install.sh              # build, test, install package, verify CLI
+./install.sh --with-model # also download the default local Qwen GGUF
+```
+
+Model download is opt-in because model files are large and governed by their own upstream terms.
+
+## Developer build and Python binding
+
+For contributors who want lower-level engine and Python binding checks:
+
+```bash
+make -C c clean all
+make -C c test
+c/build/te_smoke ../models/qwen2.5-coder-3b-instruct-q4_0-te.gguf
+make -C c oracle
+make -C c benchmark
+PYTHONPATH=python TINYENGINE_LIBRARY=$PWD/c/build/libtinyengine.dylib python3 - <<'PY'
+from tinyengine import Model, capabilities, detect_arch, make_kernel_plan
+path = "../models/qwen2.5-coder-3b-instruct-q4_0-te.gguf"
+print(detect_arch())
+print(make_kernel_plan())
+print(capabilities())
+with Model(path) as model:
+    print(model.info())
+    print(model.tensor_info("token_embd.weight"))
+    print(model.tensor_info("output.weight"))
+    print(len(model.dequantize_row("token_embd.weight", 0)))
+PY
+```
+
+Install only the Python package and CLI in editable mode:
+
+```bash
+python3 -m pip install -e .
+TINYENGINE_LIBRARY=$PWD/c/build/libtinyengine.dylib python3 -m tinyagent --help
+```
+
+`make -C c all` builds only the product runtime library and C CLI tools. Python and `llama.cpp`
+are optional development surfaces used by `test`, `oracle`, `benchmark`, and binding examples.
+
+The C ABI memory-maps GGUF v2/v3 files, parses metadata, the tensor directory, and GGUF tokenizer
+token/merge arrays, exposes Qwen model/tensor/tokenizer descriptors, and runs a real Qwen decode
+path with KV cache. CPU reference ops cover F32 reads, Q4_0/Q8_0 row dequantization, rank-2 matvec,
+RMSNorm, RoPE, attention decode, SwiGLU, residual add, and argmax.
+
+Every C kernel iteration should add or update `make -C c test`, which checks tokenizer BPE merge
+behavior, Q4_0 nibble layout, Q8_0 signed bytes, matvec orientation, RMSNorm, RoPE, attention
+decode, SwiGLU, residual add, and argmax on a tiny synthetic GGUF fixture. Large Q4_0/Q8_0 matvecs
+use the experimental Metal backend by default on Darwin; set `TINYENGINE_METAL_MATVEC=0` to force
+the CPU reference path.
+
+`make -C c oracle` runs the C generation executable against `llama-completion` on the real Qwen2.5
+GGUF and deterministic prompt; it also verifies that the C Qwen chat prompt token count matches
+llama.cpp. Override `GGUF=...` and `LLAMA_BIN=...` when those live outside the default local paths.
+The C path is correctness-comparable but still far slower than llama.cpp until more of the hot path
+is batched/fused on Metal; `llama.cpp` remains the external oracle for correctness and performance
+checks.
+
+`make -C c benchmark` repeats the same deterministic prompt, writes
+`benchmarks/c-qwen2.5-coder-3b-q4_0-te-vs-llama.json`, and records TinyEngine C timings,
+llama.cpp prompt and decode timings, text parity, and speed ratios for the optimization loop.
+The release benchmark target is `qwen2.5-coder-3b-instruct-q4_0-te.gguf`; the next optimization
+target is reducing cold-load latency and improving the Q4/Q8/lm_head/decode Metal hot path.
+
+Set `TINYENGINE_WORKLOAD=short|long|decode|auto` to make workload-specific kernel policy explicit.
+`make -C c benchmark-long` sets `TINYENGINE_WORKLOAD=long`; `autotune` sets `short` or `long` per
+workload before testing candidate kernel profiles.
+
+See `PLAN.md` for the implementation roadmap.
 
 ## Model setup
 
