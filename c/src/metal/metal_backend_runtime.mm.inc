@@ -90,7 +90,6 @@ static constexpr NSUInteger TE_METAL_RMSNORM_THREADS = 128;
 @property(nonatomic, strong) id<MTLBuffer> valueCacheTransposeBuffer;
 @property(nonatomic, assign) const void *mappingPtr;
 @property(nonatomic, assign) size_t mappingLen;
-@property(nonatomic, strong) id modelResidencySet;
 @property(nonatomic, assign) const void *warmedMappingPtr;
 @property(nonatomic, assign) size_t warmedMappingLen;
 @property(nonatomic, assign) size_t inputCapacity;

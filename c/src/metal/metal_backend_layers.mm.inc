@@ -2655,23 +2655,6 @@ te_status te_metal_warm_model(const void *mapping, size_t mapping_len) {
             return TE_STATUS_OK;
         }
 
-        // Keep the model buffer resident across every future command buffer so
-        // the driver does not re-validate residency on each prefill/decode.
-        if (@available(macOS 15.0, *)) {
-            if (runtime.modelResidencySet == nil) {
-                MTLResidencySetDescriptor *desc = [[MTLResidencySetDescriptor alloc] init];
-                NSError *resError = nil;
-                id<MTLResidencySet> set = [runtime.device newResidencySetWithDescriptor:desc error:&resError];
-                if (set != nil) {
-                    [set addAllocation:runtime.mappingBuffer];
-                    [set commit];
-                    [set requestResidency];
-                    [runtime.queue addResidencySet:set];
-                    runtime.modelResidencySet = set;
-                }
-            }
-        }
-
         // Fault every page of the model into the GPU working set up front so the
         // first real matmul does not absorb the page-in/first-use stall.
         const NSUInteger stride = (NSUInteger)sysconf(_SC_PAGESIZE);
@@ -2728,13 +2711,6 @@ te_status te_metal_release_model(const void *mapping, size_t mapping_len) {
         TEMetalRuntime *runtime = TE_METAL_RUNTIME;
         if (runtime.mappingPtr != mapping || runtime.mappingLen != mapping_len) {
             return TE_STATUS_OK;
-        }
-        if (@available(macOS 15.0, *)) {
-            if (runtime.modelResidencySet != nil) {
-                id<MTLResidencySet> set = (id<MTLResidencySet>)runtime.modelResidencySet;
-                [runtime.queue removeResidencySet:set];
-                runtime.modelResidencySet = nil;
-            }
         }
         runtime.mappingBuffer = nil;
         runtime.mappingPtr = NULL;
