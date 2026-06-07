@@ -14,9 +14,14 @@
 #define TE_METAL_GGML_TYPE_Q4_0 2u
 #define TE_METAL_GGML_TYPE_Q8_0 8u
 
-static NSString *const TE_METAL_SOURCE =
+static const char *const TE_METAL_SOURCE_CSTR =
 #include "metal/metal_kernels.metal.inc"
 ;
+
+static NSString *te_metal_source(void) {
+    static NSString *source = [[NSString alloc] initWithUTF8String:TE_METAL_SOURCE_CSTR];
+    return source;
+}
 
 // Runtime state and tuning gates stay in this translation unit because most
 // dispatch entry points use the same static helpers and cached Metal objects.

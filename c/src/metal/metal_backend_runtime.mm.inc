@@ -497,7 +497,7 @@ static te_status te_metal_init_locked(void) {
         }
 
         NSError *error = nil;
-        id<MTLLibrary> library = [device newLibraryWithSource:TE_METAL_SOURCE options:nil error:&error];
+        id<MTLLibrary> library = [device newLibraryWithSource:te_metal_source() options:nil error:&error];
         if (library == nil) {
             if (error != nil) {
                 fprintf(stderr, "tinyengine_metal_error: %s\n", [[error localizedDescription] UTF8String]);

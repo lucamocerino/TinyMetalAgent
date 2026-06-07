@@ -1,5 +1,5 @@
-// Included by metal_backend.mm to initialize TE_METAL_SOURCE. Not a standalone translation unit.
-@R"TE_METAL(
+// Included by metal_backend.mm to initialize TE_METAL_SOURCE_CSTR. Not a standalone translation unit.
+R"TE_METAL(
 #include <metal_stdlib>
 using namespace metal;
 
