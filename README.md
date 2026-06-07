@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/tiny-metal-agent-logo.png" alt="TinyMetalAgent logo" width="520">
+  <img src="docs/assets/tiny-metal-agent-logo.png" alt="TinyMetalAgent logo" width="640">
 </p>
 
 # TinyEngine / TinyAgent
