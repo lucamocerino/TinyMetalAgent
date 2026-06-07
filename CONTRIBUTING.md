@@ -7,10 +7,9 @@ Thanks for helping improve TinyEngine and TinyAgent. This project is intentional
 TinyEngine currently supports macOS on Apple Silicon only. The product build uses the platform toolchain and Apple Metal frameworks.
 
 ```bash
-git clone https://github.com/lucamocerino/tiny-metal-agent.git
-cd tiny-metal-agent
-make -C c clean all
-make -C c test
+git clone https://github.com/lucamocerino/TinyMetalAgent.git
+cd TinyMetalAgent
+./install.sh
 ```
 
 For the Python bindings and CLI, use the source tree directly or install in editable mode:
@@ -42,6 +41,7 @@ make -C c test
 python3 -m compileall -q python
 PYTHONPATH=python TINYENGINE_LIBRARY=$PWD/c/build/libtinyengine.dylib python3 -m tinyagent --help
 scripts/prepare_qwen_model.sh --dry-run --target coder
+./install.sh --dry-run --skip-tests --skip-pip-install
 ```
 
 When changing generation, tokenization, model loading, or Metal kernels, also run the relevant oracle and benchmark targets with a local model:

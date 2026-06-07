@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/tiny-metal-agent-logo.svg" alt="TinyMetalAgent logo" width="520">
+  <img src="docs/assets/tiny-metal-agent-logo.png" alt="TinyMetalAgent logo" width="520">
 </p>
 
 # TinyEngine / TinyAgent
@@ -47,6 +47,15 @@ The product runtime keeps dependencies minimal:
 No Rust, Cargo, pip packages, NumPy, PyTorch, Electron, or cloud SDKs are required.
 
 ## Current commands
+
+One-command local setup:
+
+```bash
+./install.sh              # build, test, install package, verify CLI
+./install.sh --with-model # also download the default local Qwen GGUF
+```
+
+Model download is opt-in because model files are large and governed by their own upstream terms.
 
 Build the C ABI runtime and Python binding:
 
@@ -225,3 +234,10 @@ TinyMetalAgent has important limitations that come from both the current model t
 - `SUPPORT.md` explains where to ask for help.
 - `CHANGELOG.md` and `RELEASE.md` track release notes and release process.
 - `benchmarks/README.md` explains benchmark artifact policy.
+
+## AI assistance disclosure
+
+This repository was developed with substantial assistance from GPT-5.5. The generated code,
+documentation, tests, and release scaffolding were reviewed, edited, and validated by the project
+maintainer before publication. The project should still be treated as alpha software: inspect the
+code, run the tests, and evaluate safety boundaries before using it in real coursework or projects.

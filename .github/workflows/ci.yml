@@ -65,10 +65,13 @@ jobs:
           test -f docs/SAFETY.md
           test -f benchmarks/README.md
           test -f pyproject.toml
+          test -f install.sh
           test -f scripts/prepare_qwen_model.sh
 
-      - name: Check model helper script
+      - name: Check install and model helper scripts
         run: |
+          bash -n install.sh
+          ./install.sh --dry-run --skip-tests --skip-pip-install
           bash -n scripts/prepare_qwen_model.sh
           scripts/prepare_qwen_model.sh --help
           scripts/prepare_qwen_model.sh --dry-run --target coder

@@ -20,3 +20,6 @@ This project follows semantic versioning once formal releases begin. Before `1.0
 - Added a deterministic Matrix integration test that drives real agent tools to create a pure-Python Matrix class, write unittest coverage, and run it.
 - Added an original SVG repository logo focused on local AI learning for students.
 - Added an SVG terminal demo screen to the README.
+- Added a README disclosure that the repository was developed with substantial GPT-5.5 assistance.
+- Added a PNG fallback for the README logo to improve GitHub rendering reliability.
+- Added `install.sh` for one-command local build, test, editable install, CLI check, and optional model download.

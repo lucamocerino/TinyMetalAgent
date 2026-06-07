@@ -28,9 +28,9 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/lucamocerino/tiny-metal-agent"
-Issues = "https://github.com/lucamocerino/tiny-metal-agent/issues"
-Security = "https://github.com/lucamocerino/tiny-metal-agent/security"
+Homepage = "https://github.com/lucamocerino/TinyMetalAgent"
+Issues = "https://github.com/lucamocerino/TinyMetalAgent/issues"
+Security = "https://github.com/lucamocerino/TinyMetalAgent/security"
 
 [project.scripts]
 tinyagent = "tinyagent.cli:main"
