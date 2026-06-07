@@ -15,7 +15,7 @@ $(error TinyEngine supports Apple platforms only (Darwin); detected '$(UNAME_S)'
 endif
 
 CFLAGS ?= -std=c11 -O3 -Wall -Wextra -Werror -pedantic -fPIC
-CXXFLAGS ?= -O3 -Wall -Wextra -Werror -fPIC -fobjc-arc
+CXXFLAGS ?= -std=c++11 -O3 -Wall -Wextra -Werror -fPIC -fobjc-arc
 CPPFLAGS ?= -I$(INCLUDE_DIR)
 
 LIB := $(BUILD_DIR)/libtinyengine.$(SHARED_EXT)
