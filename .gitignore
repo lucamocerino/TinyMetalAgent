@@ -1,6 +1,7 @@
 /c/build
 /.idea
 /.vscode
+/.venv
 .DS_Store
 *.log
 *.gguf

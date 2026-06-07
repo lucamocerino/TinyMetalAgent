@@ -139,6 +139,7 @@ One-command local setup for most users:
 ./install.sh --with-model # also download the default local Qwen GGUF
 ```
 
+The installer creates a local `.venv` so it does not need to modify the system Python installation.
 Model download is opt-in because model files are large and governed by their own upstream terms.
 
 ## Developer build and Python binding

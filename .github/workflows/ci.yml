@@ -25,14 +25,19 @@ jobs:
       - name: Compile Python packages
         run: python3 -m compileall -q python
 
+      - name: Create Python virtual environment
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip setuptools
+
       - name: Check Python package metadata
-        run: python3 -m pip install -e .
+        run: .venv/bin/python -m pip install -e .
 
       - name: Check TinyAgent CLI help
         run: |
           export TINYENGINE_LIBRARY="$PWD/c/build/libtinyengine.dylib"
-          python3 -m tinyagent --help
-          python3 - <<'PY'
+          .venv/bin/python -m tinyagent --help
+          .venv/bin/python - <<'PY'
           import importlib.metadata as metadata
 
           entry_points = metadata.entry_points()

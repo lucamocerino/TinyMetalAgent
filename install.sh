@@ -16,7 +16,8 @@ Default setup:
   - builds the C/Metal TinyEngine runtime
   - runs C tests
   - compiles Python packages
-  - installs the Python package in editable mode
+  - creates a local .venv virtual environment
+  - installs the Python package in editable mode inside .venv
   - verifies the tinyagent CLI starts
 
 Options:
@@ -24,7 +25,7 @@ Options:
                            This is intentionally opt-in because model files are large
                            and governed by upstream model terms.
   --skip-tests             Build/install without running C tests.
-  --skip-pip-install       Do not run `python3 -m pip install -e .`.
+  --skip-pip-install       Do not create .venv or install the editable package.
   --dry-run                Print commands without executing them.
   --help                   Show this help.
 
@@ -110,12 +111,19 @@ log "Checking Python sources"
 run python3 -m compileall -q python
 
 if [ "$SKIP_PIP_INSTALL" -eq 0 ]; then
-  log "Installing Python package in editable mode"
-  run python3 -m pip install -e .
+  log "Creating local Python virtual environment"
+  run python3 -m venv .venv
+  log "Updating pip and setuptools inside .venv"
+  run .venv/bin/python -m pip install --upgrade pip setuptools
+  log "Installing Python package in editable mode inside .venv"
+  run .venv/bin/python -m pip install -e .
+  PYTHON_CMD="$ROOT_DIR/.venv/bin/python"
+else
+  PYTHON_CMD="python3"
 fi
 
 log "Checking tinyagent CLI"
-run env TINYENGINE_LIBRARY="$ROOT_DIR/c/build/libtinyengine.dylib" python3 -m tinyagent --help
+run env TINYENGINE_LIBRARY="$ROOT_DIR/c/build/libtinyengine.dylib" "$PYTHON_CMD" -m tinyagent --help
 
 if [ "$WITH_MODEL" -eq 1 ]; then
   log "Preparing default local Qwen model"
@@ -130,6 +138,7 @@ TinyMetalAgent local setup complete.
 
 Next steps:
   export TINYENGINE_LIBRARY="$ROOT_DIR/c/build/libtinyengine.dylib"
+  source "$ROOT_DIR/.venv/bin/activate"
   bin/tinyagent --ask "hello"
 
 If you did not use --with-model, place qwen2.5-coder-3b-instruct-q4_0-te.gguf in
