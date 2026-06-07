@@ -24,3 +24,4 @@ This project follows semantic versioning once formal releases begin. Before `1.0
 - Added a PNG fallback for the README logo to improve GitHub rendering reliability.
 - Added `install.sh` for one-command local build, test, editable install, CLI check, and optional model download.
 - Added README documentation for kernel and runtime optimization techniques used to speed up local inference.
+- Expanded README details for `TINYENGINE_WORKLOAD` prefill/decode policy and benchmark usage.

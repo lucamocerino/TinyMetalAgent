@@ -227,6 +227,36 @@ These optimizations are intentionally transparent: most switches are exposed thr
 students and contributors can observe tradeoffs, reproduce benchmark runs, and learn how kernel choices affect
 latency, throughput, memory pressure, and correctness.
 
+### `TINYENGINE_WORKLOAD` policy
+
+Transformer inference has two very different phases:
+
+- **Prefill** processes the prompt tokens and fills the KV cache. It benefits from batched work, larger matrix
+  operations, fewer per-token dispatches, and kernels that can amortize setup cost across many tokens.
+- **Decode** generates one token at a time after prefill. It is latency-sensitive and benefits from small,
+  fused dispatches, fast lm_head projection/argmax, and avoiding heavyweight long-prefill kernels.
+
+TinyEngine exposes this choice explicitly through `TINYENGINE_WORKLOAD`:
+
+| Value | Intended use | Runtime behavior |
+| --- | --- | --- |
+| `short` | Short prompts and interactive agent turns. | Avoids long-prefill-only paths that can add overhead on small batches. |
+| `long` | Long prompt prefill and benchmark-long style runs. | Enables long-prefill heuristics such as K/V matmul choices, paired FFN/SwiGLU paths, and larger attention/prefill strategies when batch size justifies them. |
+| `decode` | Token-by-token generation experiments. | Biases decisions away from prefill-specific kernels so decode latency is easier to isolate. |
+| `auto` | Default general-purpose mode. | Chooses based on batch size; current heuristics treat larger batches as long-prefill workloads. |
+
+The benchmark and autotune tools set this deliberately instead of hiding it:
+
+```bash
+TINYENGINE_WORKLOAD=short make -C c benchmark
+TINYENGINE_WORKLOAD=long make -C c benchmark-long
+make -C c autotune AUTOTUNE_WORKLOADS=short,long
+```
+
+This is useful when experimenting on 8 GB machines because the fastest strategy for a short REPL request is not
+necessarily the fastest strategy for a long prompt. Making the policy visible helps contributors compare
+latency, throughput, and memory-pressure tradeoffs without changing source code.
+
 ## Model setup
 
 Model weights are not included in this repository. Place a trusted Qwen-compatible GGUF at one of
