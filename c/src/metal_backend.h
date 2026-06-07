@@ -101,6 +101,46 @@ te_status te_metal_qkv_batch_f32(
     float *v_out
 );
 
+te_status te_metal_attention_qk_mma_f32(
+    const float *query,
+    const float *key_t,
+    size_t q_rows,
+    size_t k_cols,
+    size_t head_dim,
+    float *out
+);
+
+te_status te_metal_attention_tile_mma_f32(
+    const float *query,
+    const float *key_t,
+    const float *value,
+    size_t q_rows,
+    size_t k_cols,
+    size_t head_dim,
+    float *out
+);
+
+te_status te_metal_attention_stream_mma_f32(
+    const float *query,
+    const float *key_t,
+    const float *value,
+    size_t q_rows,
+    size_t k_cols,
+    size_t head_dim,
+    float *out
+);
+
+te_status te_metal_attention_causal_mma_f32(
+    const float *query,
+    const float *key_t,
+    const float *value,
+    size_t q_rows,
+    size_t k_cols,
+    size_t head_dim,
+    size_t q_base,
+    float *out
+);
+
 te_status te_metal_mlp_f32(
     const void *mapping,
     size_t mapping_len,
@@ -301,6 +341,10 @@ te_status te_metal_prefill_all_layers_f32(
     float epsilon,
     float *out
 );
+
+te_status te_metal_warm_model(const void *mapping, size_t mapping_len);
+
+te_status te_metal_release_model(const void *mapping, size_t mapping_len);
 
 #ifdef __cplusplus
 }

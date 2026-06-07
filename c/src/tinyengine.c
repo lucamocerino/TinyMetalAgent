@@ -1,4 +1,5 @@
 #include "tinyengine_internal.h"
+#include "metal_backend.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -300,6 +301,10 @@ te_status te_model_load_gguf(
         return status;
     }
 
+    // Best-effort: make the mmap'd weights resident on the GPU now so the first
+    // prefill does not absorb the model page-in stall. Failures are ignored.
+    (void)te_metal_warm_model(model->mapping, model->mapping_len);
+
     *out_model = model;
     return TE_STATUS_OK;
 }
@@ -416,6 +421,22 @@ te_status te_generate(
         }
     }
     return TE_STATUS_OK;
+}
+
+te_status te_generate_raw(
+    te_context *context,
+    const char *prompt,
+    uint32_t max_tokens,
+    te_token_callback callback,
+    void *userdata
+) {
+    if (context == NULL || prompt == NULL) {
+        return TE_STATUS_INVALID_ARGUMENT;
+    }
+    if (max_tokens == 0) {
+        return TE_STATUS_OK;
+    }
+    return te_qwen_generate_raw(context, prompt, max_tokens, callback, userdata);
 }
 
 char *te_strdup(const char *value) {

@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  macos-build-test:
+    name: macOS build and tests
+    runs-on: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build TinyEngine
+        run: make -C c clean all
+
+      - name: Run C tests
+        run: make -C c test
+
+      - name: Compile Python packages
+        run: python3 -m compileall -q python
+
+      - name: Check Python package metadata
+        run: python3 -m pip install -e .
+
+      - name: Check TinyAgent CLI help
+        run: |
+          export TINYENGINE_LIBRARY="$PWD/c/build/libtinyengine.dylib"
+          python3 -m tinyagent --help
+          python3 - <<'PY'
+          import importlib.metadata as metadata
+
+          entry_points = metadata.entry_points()
+          if hasattr(entry_points, "select"):
+              scripts = entry_points.select(group="console_scripts")
+          else:
+              scripts = entry_points.get("console_scripts", [])
+          assert any(ep.name == "tinyagent" and ep.value == "tinyagent.cli:main" for ep in scripts)
+          PY
+
+  docs-metadata:
+    name: Docs and metadata
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Ensure required OSS files exist
+        run: |
+          test -f README.md
+          test -f LICENSE
+          test -f CONTRIBUTING.md
+          test -f CODE_OF_CONDUCT.md
+          test -f SECURITY.md
+          test -f SUPPORT.md
+          test -f CHANGELOG.md
+          test -f RELEASE.md
+          test -f NOTICE
+          test -f docs/MODELS.md
+          test -f docs/SAFETY.md
+          test -f benchmarks/README.md
+          test -f pyproject.toml
+          test -f scripts/prepare_qwen_model.sh
+
+      - name: Check model helper script
+        run: |
+          bash -n scripts/prepare_qwen_model.sh
+          scripts/prepare_qwen_model.sh --help
+          scripts/prepare_qwen_model.sh --dry-run --target coder
+
+      - name: Validate pyproject syntax
+        run: python3 - <<'PY'
+          import pathlib
+          import tomllib
+
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          project = data["project"]
+          assert project["name"] == "tiny-metal-agent"
+          assert project["version"]
+          assert "tinyagent" in project["scripts"]
+          PY

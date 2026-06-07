@@ -1,4 +1,5 @@
 #include "tinyengine_internal.h"
+#include "metal_backend.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -173,6 +174,9 @@ void te_model_release_gguf(te_model *model) {
     }
     te_tokenizer_release(model);
     model->tensor_count = 0;
+    // Drop the GPU buffer/residency view of these weights before unmapping so
+    // the Metal runtime never references freed memory.
+    (void)te_metal_release_model(model->mapping, model->mapping_len);
     te_unmap_file(model->mapping, model->mapping_len);
     model->mapping = NULL;
     model->mapping_len = 0;

@@ -1,0 +1,8 @@
+TinyMetalAgent
+Copyright (c) 2026 TinyMetalAgent contributors
+
+TinyMetalAgent is distributed under the MIT License. See `LICENSE`.
+
+This repository references Qwen-compatible GGUF models for local inference. Model weights are not included in this repository. Downloaded model files are governed by their own upstream licenses and terms.
+
+This repository can use an external `llama-completion` binary from llama.cpp as an optional oracle for parity and benchmark checks. llama.cpp is not linked into the TinyEngine product runtime and is governed by its own upstream license.

@@ -120,6 +120,20 @@ The product runtime should stay buildable with only the platform toolchain and O
 `make -C c all` must remain the dependency-minimal product build. Targets such as `test`,
 `oracle`, `benchmark`, and `autotune` may require optional development tools.
 
+### Platform support: Apple-only
+
+TinyEngine targets Apple Silicon (Metal) exclusively. There is no portable/CPU fallback build and
+no non-Apple stub path. This is enforced at three layers so unsupported builds fail fast and clearly:
+
+1. `c/include/tinyengine.h` raises `#error` when `__APPLE__` is not defined. Because it is the root
+   public header included by every translation unit, this guards the whole library.
+2. `c/Makefile` raises `$(error ...)` for any non-`Darwin` `uname` before compilation starts.
+3. `c/src/metal_backend.mm` is unconditionally Apple/Metal source; the former `#else` non-Apple stub
+   branch was removed.
+
+A portable backend could be revisited later, but until then Apple-only keeps the runtime lean and
+avoids carrying an untested cross-platform surface.
+
 ## Workload-specific kernel policy
 
 Prompt prefill, decode, and short prompts should not share one hidden default. Runtime policy uses
@@ -164,7 +178,7 @@ Benchmark in two stages:
 
 1. Cold-path benchmarks: include current one-shot Metal shader compilation and dispatch. These expose startup overhead and validate memory pressure.
 2. Steady-state benchmarks: reuse compiled pipeline states and buffers. These are the numbers that matter for decode throughput.
-3. Apple-to-apple optimization-loop benchmarks: compare TinyEngine C against `llama-completion` on the same Qwen2.5 0.5B prompt and deterministic generation settings, saving JSON under `benchmarks/`. `make -C c benchmark` writes `benchmarks/c-qwen2.5-0.5b-q4_0-vs-llama.json` with TinyEngine C timings, llama.cpp timings, text parity, and speed ratios.
+3. Apple-to-apple optimization-loop benchmarks: compare TinyEngine C against `llama-completion` on the same Qwen2.5-Coder 3B prompt and deterministic generation settings, saving JSON under `benchmarks/`. `make -C c benchmark` writes `benchmarks/c-qwen2.5-coder-3b-q4_0-te-vs-llama.json` with TinyEngine C timings, llama.cpp timings, text parity, and speed ratios.
 
 ## C ABI runtime track
 

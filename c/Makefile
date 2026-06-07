@@ -11,11 +11,7 @@ RPATH_FLAGS := -Wl,-rpath,@loader_path
 METAL_OBJECTS := $(BUILD_DIR)/metal_backend.o
 METAL_LDFLAGS := -framework Foundation -framework Metal
 else
-SHARED_EXT := so
-SHARED_FLAGS := -shared
-RPATH_FLAGS := -Wl,-rpath,'$$ORIGIN'
-METAL_OBJECTS :=
-METAL_LDFLAGS :=
+$(error TinyEngine supports Apple platforms only (Darwin); detected '$(UNAME_S)')
 endif
 
 CFLAGS ?= -std=c11 -O3 -Wall -Wextra -Werror -pedantic -fPIC
@@ -29,7 +25,7 @@ KERNEL_TEST := $(BUILD_DIR)/te_kernel_tests
 GENERATED_METAL_GUARD_TESTS := $(BUILD_DIR)/generated_metal_guard_tests.inc
 OBJECTS := $(BUILD_DIR)/tinyengine.o $(BUILD_DIR)/gguf.o $(BUILD_DIR)/ops.o $(BUILD_DIR)/tokenizer.o $(BUILD_DIR)/qwen.o $(METAL_OBJECTS)
 LDLIBS ?= -lm
-GGUF ?= ../../models/qwen2.5-0.5b-instruct-q4_0.gguf
+GGUF ?= ../../models/qwen2.5-coder-3b-instruct-q4_0-te.gguf
 LLAMA_BIN ?= ../../tools/llama.cpp-b9219/current/llama-completion
 ORACLE_PROMPT ?= Rispondi in italiano con tre parole: cosa sei?
 ORACLE_C_TOKENS ?= 4
@@ -38,7 +34,7 @@ ORACLE_SEED ?= 42
 ORACLE_GPU_LAYERS ?= 999
 ORACLE_CTX_SIZE ?= 512
 BENCHMARK_RUNS ?= 3
-BENCHMARK_OUT ?= ../benchmarks/c-qwen2.5-0.5b-q4_0-vs-llama.json
+BENCHMARK_OUT ?= ../benchmarks/c-qwen2.5-coder-3b-q4_0-te-vs-llama.json
 BENCHMARK_ALLOW_MISMATCH ?= 0
 TINYENGINE_WORKLOAD ?= auto
 LONG_BENCHMARK_PROMPT ?= Contesto: questo benchmark contiene una richiesta volutamente lunga per misurare la fase di prefill su input piu estesi. Ripeti mentalmente che devi ignorare il contesto descrittivo e rispondere solo alla domanda finale. Dettagli: agente, runtime, kernel Metal, memoria KV, prompt lungo, ottimizzazione, confronto con llama.cpp, misurazione stabile, batch prefill, decode su GPU, sincronizzazioni ridotte, cache persistente, throughput, latenza, accuratezza, oracle, output breve. Ancora contesto non rilevante: il sistema deve mantenere lo stesso comportamento deterministico anche quando il prompt cresce e contiene molte parole prima della domanda finale. Domanda finale: Rispondi in italiano con tre parole: cosa sei?
@@ -46,7 +42,7 @@ LONG_BENCHMARK_CTX_SIZE ?= 1024
 LONG_BENCHMARK_C_TOKENS ?= 4
 LONG_BENCHMARK_LLAMA_PREDICT ?= 4
 LONG_BENCHMARK_ALLOW_MISMATCH ?= 0
-LONG_BENCHMARK_OUT ?= ../benchmarks/c-qwen2.5-0.5b-q4_0-long-prompt-1024ctx-vs-llama.json
+LONG_BENCHMARK_OUT ?= ../benchmarks/c-qwen2.5-coder-3b-q4_0-te-long-prompt-1024ctx-vs-llama.json
 AUTOTUNE_RUNS ?= 3
 AUTOTUNE_PROFILES ?= default,matmul-off,gateup-matmul-off,kv-matmul-on,kv-matmul-off,q8-llama-off,flash-attn-off,flash-longtile-off,ffn-half-off,ffn-pair-swiglu-off,ffn-down-add-off,ffn-down-add-on,ffn-gate-half-on,argmax-cpu,prefill-layer,decode-layer,qkv-off
 AUTOTUNE_WORKLOADS ?= short,long

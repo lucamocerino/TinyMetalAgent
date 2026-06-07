@@ -1,6 +1,6 @@
 // Included by metal_backend.mm. Contains Metal runtime state, profiling, env gates, and helpers.
 static constexpr NSUInteger TE_METAL_Q4_ROW_TILE = 4;
-static constexpr NSUInteger TE_METAL_Q4_LLAMA_ROW_TILE = 8;
+static constexpr NSUInteger TE_METAL_Q4_LLAMA_ROW_TILE = 2;
 static constexpr NSUInteger TE_METAL_Q4_LLAMA_THREADS = 64;
 static constexpr NSUInteger TE_METAL_Q4_PAIR_ROW_TILE = 4;
 static constexpr NSUInteger TE_METAL_Q4_BATCH_ROW_TILE = 1;
@@ -44,18 +44,25 @@ static constexpr NSUInteger TE_METAL_RMSNORM_THREADS = 128;
 @property(nonatomic, strong) id<MTLComputePipelineState> q4BatchPairLlamaPipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> q8Pipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> q8LlamaPipeline;
+@property(nonatomic, strong) id<MTLComputePipelineState> attentionQkMmaPipeline;
+@property(nonatomic, strong) id<MTLComputePipelineState> attentionTileMmaPipeline;
+@property(nonatomic, strong) id<MTLComputePipelineState> attentionStreamMmaPipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> argmaxBlocksPipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> argmaxFinishPipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> swigluPipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> addPipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> rmsnormPipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> vectorCopyPipeline;
+@property(nonatomic, strong) id<MTLComputePipelineState> touchPipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> qkvBiasRopeCachePipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> qkvBiasRopeCacheBatchPipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> qkvBiasRopeCacheBatchHalfPipeline;
+@property(nonatomic, strong) id<MTLComputePipelineState> qkvBiasRopeCacheBatchTransposePipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> attentionDecodePipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> attentionFlashPipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> attentionFlashLongPipeline;
+@property(nonatomic, strong) id<MTLComputePipelineState> attentionFlashLongTransposePipeline;
+@property(nonatomic, strong) id<MTLComputePipelineState> attentionFlashMmaTransposePipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> attentionFlashGqaPipeline;
 @property(nonatomic, strong) id<MTLComputePipelineState> attentionFlashHalfPipeline;
 @property(nonatomic, strong) id<MTLBuffer> mappingBuffer;
@@ -79,8 +86,13 @@ static constexpr NSUInteger TE_METAL_RMSNORM_THREADS = 128;
 @property(nonatomic, strong) id<MTLBuffer> valueCacheBuffer;
 @property(nonatomic, strong) id<MTLBuffer> keyCacheHalfBuffer;
 @property(nonatomic, strong) id<MTLBuffer> valueCacheHalfBuffer;
+@property(nonatomic, strong) id<MTLBuffer> keyCacheTransposeBuffer;
+@property(nonatomic, strong) id<MTLBuffer> valueCacheTransposeBuffer;
 @property(nonatomic, assign) const void *mappingPtr;
 @property(nonatomic, assign) size_t mappingLen;
+@property(nonatomic, strong) id modelResidencySet;
+@property(nonatomic, assign) const void *warmedMappingPtr;
+@property(nonatomic, assign) size_t warmedMappingLen;
 @property(nonatomic, assign) size_t inputCapacity;
 @property(nonatomic, assign) size_t outputCapacity;
 @property(nonatomic, assign) size_t output2Capacity;
@@ -98,6 +110,14 @@ static constexpr NSUInteger TE_METAL_RMSNORM_THREADS = 128;
 @property(nonatomic, assign) size_t valueCacheCapacity;
 @property(nonatomic, assign) size_t keyCacheHalfCapacity;
 @property(nonatomic, assign) size_t valueCacheHalfCapacity;
+@property(nonatomic, assign) size_t keyCacheTransposeCapacity;
+@property(nonatomic, assign) size_t valueCacheTransposeCapacity;
+@property(nonatomic, assign) BOOL residentKvCacheValid;
+@property(nonatomic, assign) const void *residentKvMappingPtr;
+@property(nonatomic, assign) size_t residentKvLayers;
+@property(nonatomic, assign) size_t residentKvContextTokens;
+@property(nonatomic, assign) size_t residentKvKv;
+@property(nonatomic, assign) size_t residentKvFilledTokens;
 @property(nonatomic, assign) BOOL flashAttentionEnabled;
 @property(nonatomic, assign) BOOL q4FfnHalfEnabled;
 @property(nonatomic, assign) BOOL q4FfnDownAddEnabled;
@@ -380,6 +400,30 @@ static bool te_metal_flash_attention_gqa_requested(void) {
     return value != nullptr && strcmp(value, "0") != 0;
 }
 
+static bool te_metal_resident_kv_requested(size_t tokens) {
+    const char *value = getenv("TINYENGINE_RESIDENT_KV");
+    if (value != nullptr) {
+        return strcmp(value, "0") != 0;
+    }
+    return tokens >= 512u;
+}
+
+static bool te_metal_transposed_prefill_kv_requested(size_t batch) {
+    const char *value = getenv("TINYENGINE_TRANSPOSED_KV");
+    if (value != nullptr) {
+        return strcmp(value, "0") != 0;
+    }
+    return batch >= 512u;
+}
+
+static bool te_metal_mma_prefill_attention_requested(size_t batch) {
+    const char *value = getenv("TINYENGINE_MMA_PREFILL_ATTN");
+    if (value != nullptr) {
+        return strcmp(value, "0") != 0;
+    }
+    return batch >= 512u;
+}
+
 static bool te_metal_flash_attention_long_tile_requested(size_t batch) {
     const char *value = getenv("TINYENGINE_FLASH_ATTN_LONG_TILE");
     if (value != nullptr) {
@@ -514,14 +558,20 @@ static te_status te_metal_init_locked(void) {
         id<MTLFunction> q8Llama = q8LlamaRequested
             ? [library newFunctionWithName:@"te_q8_0_matvec_llama_f32"]
             : nil;
+        id<MTLFunction> attentionQkMma = [library newFunctionWithName:@"te_attention_qk_mma_f32_kernel"];
+        id<MTLFunction> attentionTileMma = [library newFunctionWithName:@"te_attention_tile_mma_f32_kernel"];
+        id<MTLFunction> attentionStreamMma = [library newFunctionWithName:@"te_attention_stream_mma_f32_kernel"];
         id<MTLFunction> argmaxBlocks = [library newFunctionWithName:@"te_argmax_blocks_f32"];
         id<MTLFunction> argmaxFinish = [library newFunctionWithName:@"te_argmax_finish_f32"];
         id<MTLFunction> swiglu = [library newFunctionWithName:@"te_swiglu_f32"];
         id<MTLFunction> add = [library newFunctionWithName:@"te_add_f32_kernel"];
         id<MTLFunction> rmsnorm = [library newFunctionWithName:@"te_rmsnorm_batch_f32"];
         id<MTLFunction> copy = [library newFunctionWithName:@"te_copy_f32_kernel"];
+        id<MTLFunction> touch = [library newFunctionWithName:@"te_touch_u8_stride"];
         id<MTLFunction> qkvBiasRopeCache = [library newFunctionWithName:@"te_qkv_bias_rope_cache_f32"];
         id<MTLFunction> qkvBiasRopeCacheBatch = [library newFunctionWithName:@"te_qkv_bias_rope_cache_batch_f32"];
+        id<MTLFunction> qkvBiasRopeCacheBatchTranspose =
+            [library newFunctionWithName:@"te_qkv_bias_rope_cache_batch_t_f32"];
         const bool flashAttnHalfKvRequested = flashAttnRequested && te_metal_flash_attention_half_kv_requested();
         id<MTLFunction> qkvBiasRopeCacheBatchHalf = flashAttnHalfKvRequested
             ? [library newFunctionWithName:@"te_qkv_bias_rope_cache_batch_h_f32"]
@@ -532,6 +582,12 @@ static te_status te_metal_init_locked(void) {
             : nil;
         id<MTLFunction> attentionFlashLong = flashAttnRequested
             ? [library newFunctionWithName:@"te_attention_flash_t128_f32_kernel"]
+            : nil;
+        id<MTLFunction> attentionFlashLongTranspose = flashAttnRequested
+            ? [library newFunctionWithName:@"te_attention_flash_t128_t_f32_kernel"]
+            : nil;
+        id<MTLFunction> attentionFlashMmaTranspose = flashAttnRequested
+            ? [library newFunctionWithName:@"te_attention_flash_mma_t_f32_kernel"]
             : nil;
         const bool flashAttnGqaRequested = flashAttnRequested && te_metal_flash_attention_gqa_requested();
         id<MTLFunction> attentionFlashGqa = flashAttnGqaRequested
@@ -549,13 +605,17 @@ static te_status te_metal_init_locked(void) {
             (q4FfnDownAddRequested && q4MatmulHalfInputAdd == nil) ||
             (q4FfnGateHalfRequested && (q4MatmulStoreHalf == nil || q4MatmulSwigluGateHalf == nil)) ||
             q4Pair == nil || q4Batch == nil || q4BatchPair == nil || q8 == nil ||
+            attentionQkMma == nil || attentionTileMma == nil || attentionStreamMma == nil ||
             (q8LlamaRequested && q8Llama == nil) ||
             argmaxBlocks == nil || argmaxFinish == nil ||
             swiglu == nil || add == nil || rmsnorm == nil ||
             copy == nil || qkvBiasRopeCache == nil || qkvBiasRopeCacheBatch == nil ||
+            qkvBiasRopeCacheBatchTranspose == nil ||
             (flashAttnHalfKvRequested && qkvBiasRopeCacheBatchHalf == nil) ||
             attentionDecode == nil || (flashAttnRequested && attentionFlash == nil) ||
             (flashAttnRequested && attentionFlashLong == nil) ||
+            (flashAttnRequested && attentionFlashLongTranspose == nil) ||
+            (flashAttnRequested && attentionFlashMmaTranspose == nil) ||
             (flashAttnGqaRequested && attentionFlashGqa == nil) ||
             (flashAttnHalfKvRequested && attentionFlashHalf == nil)) {
             return TE_STATUS_RUNTIME_ERROR;
@@ -605,6 +665,12 @@ static te_status te_metal_init_locked(void) {
         id<MTLComputePipelineState> q8LlamaPipeline = q8LlamaRequested
             ? [device newComputePipelineStateWithFunction:q8Llama error:&error]
             : nil;
+        id<MTLComputePipelineState> attentionQkMmaPipeline =
+            [device newComputePipelineStateWithFunction:attentionQkMma error:&error];
+        id<MTLComputePipelineState> attentionTileMmaPipeline =
+            [device newComputePipelineStateWithFunction:attentionTileMma error:&error];
+        id<MTLComputePipelineState> attentionStreamMmaPipeline =
+            [device newComputePipelineStateWithFunction:attentionStreamMma error:&error];
         id<MTLComputePipelineState> argmaxBlocksPipeline =
             [device newComputePipelineStateWithFunction:argmaxBlocks error:&error];
         id<MTLComputePipelineState> argmaxFinishPipeline =
@@ -613,10 +679,15 @@ static te_status te_metal_init_locked(void) {
         id<MTLComputePipelineState> addPipeline = [device newComputePipelineStateWithFunction:add error:&error];
         id<MTLComputePipelineState> rmsnormPipeline = [device newComputePipelineStateWithFunction:rmsnorm error:&error];
         id<MTLComputePipelineState> vectorCopyPipeline = [device newComputePipelineStateWithFunction:copy error:&error];
+        id<MTLComputePipelineState> touchPipeline = touch != nil
+            ? [device newComputePipelineStateWithFunction:touch error:&error]
+            : nil;
         id<MTLComputePipelineState> qkvBiasRopeCachePipeline =
             [device newComputePipelineStateWithFunction:qkvBiasRopeCache error:&error];
         id<MTLComputePipelineState> qkvBiasRopeCacheBatchPipeline =
             [device newComputePipelineStateWithFunction:qkvBiasRopeCacheBatch error:&error];
+        id<MTLComputePipelineState> qkvBiasRopeCacheBatchTransposePipeline =
+            [device newComputePipelineStateWithFunction:qkvBiasRopeCacheBatchTranspose error:&error];
         id<MTLComputePipelineState> qkvBiasRopeCacheBatchHalfPipeline = flashAttnHalfKvRequested
             ? [device newComputePipelineStateWithFunction:qkvBiasRopeCacheBatchHalf error:&error]
             : nil;
@@ -627,6 +698,12 @@ static te_status te_metal_init_locked(void) {
             : nil;
         id<MTLComputePipelineState> attentionFlashLongPipeline = flashAttnRequested
             ? [device newComputePipelineStateWithFunction:attentionFlashLong error:&error]
+            : nil;
+        id<MTLComputePipelineState> attentionFlashLongTransposePipeline = flashAttnRequested
+            ? [device newComputePipelineStateWithFunction:attentionFlashLongTranspose error:&error]
+            : nil;
+        id<MTLComputePipelineState> attentionFlashMmaTransposePipeline = flashAttnRequested
+            ? [device newComputePipelineStateWithFunction:attentionFlashMmaTranspose error:&error]
             : nil;
         id<MTLComputePipelineState> attentionFlashGqaPipeline = flashAttnGqaRequested
             ? [device newComputePipelineStateWithFunction:attentionFlashGqa error:&error]
@@ -644,14 +721,18 @@ static te_status te_metal_init_locked(void) {
             (q4FfnGateHalfRequested && (q4MatmulStoreHalfPipeline == nil || q4MatmulSwigluGateHalfPipeline == nil)) ||
             q4PairPipeline == nil || q4BatchPipeline == nil ||
             q4BatchPairPipeline == nil || q8Pipeline == nil ||
+            attentionQkMmaPipeline == nil || attentionTileMmaPipeline == nil || attentionStreamMmaPipeline == nil ||
             (q8LlamaRequested && q8LlamaPipeline == nil) ||
             argmaxBlocksPipeline == nil || argmaxFinishPipeline == nil ||
             swigluPipeline == nil || addPipeline == nil || rmsnormPipeline == nil ||
             vectorCopyPipeline == nil || qkvBiasRopeCachePipeline == nil ||
-            qkvBiasRopeCacheBatchPipeline == nil || attentionDecodePipeline == nil ||
+            qkvBiasRopeCacheBatchPipeline == nil || qkvBiasRopeCacheBatchTransposePipeline == nil ||
+            attentionDecodePipeline == nil ||
             (flashAttnHalfKvRequested && qkvBiasRopeCacheBatchHalfPipeline == nil) ||
             (flashAttnRequested && attentionFlashPipeline == nil) ||
             (flashAttnRequested && attentionFlashLongPipeline == nil) ||
+            (flashAttnRequested && attentionFlashLongTransposePipeline == nil) ||
+            (flashAttnRequested && attentionFlashMmaTransposePipeline == nil) ||
             (flashAttnGqaRequested && attentionFlashGqaPipeline == nil) ||
             (flashAttnHalfKvRequested && attentionFlashHalfPipeline == nil)) {
             return TE_STATUS_RUNTIME_ERROR;
@@ -682,18 +763,25 @@ static te_status te_metal_init_locked(void) {
         runtime.q4BatchPairLlamaPipeline = q4BatchPairLlamaPipeline;
         runtime.q8Pipeline = q8Pipeline;
         runtime.q8LlamaPipeline = q8LlamaPipeline;
+        runtime.attentionQkMmaPipeline = attentionQkMmaPipeline;
+        runtime.attentionTileMmaPipeline = attentionTileMmaPipeline;
+        runtime.attentionStreamMmaPipeline = attentionStreamMmaPipeline;
         runtime.argmaxBlocksPipeline = argmaxBlocksPipeline;
         runtime.argmaxFinishPipeline = argmaxFinishPipeline;
         runtime.swigluPipeline = swigluPipeline;
         runtime.addPipeline = addPipeline;
         runtime.rmsnormPipeline = rmsnormPipeline;
         runtime.vectorCopyPipeline = vectorCopyPipeline;
+        runtime.touchPipeline = touchPipeline;
         runtime.qkvBiasRopeCachePipeline = qkvBiasRopeCachePipeline;
         runtime.qkvBiasRopeCacheBatchPipeline = qkvBiasRopeCacheBatchPipeline;
         runtime.qkvBiasRopeCacheBatchHalfPipeline = qkvBiasRopeCacheBatchHalfPipeline;
+        runtime.qkvBiasRopeCacheBatchTransposePipeline = qkvBiasRopeCacheBatchTransposePipeline;
         runtime.attentionDecodePipeline = attentionDecodePipeline;
         runtime.attentionFlashPipeline = attentionFlashPipeline;
         runtime.attentionFlashLongPipeline = attentionFlashLongPipeline;
+        runtime.attentionFlashLongTransposePipeline = attentionFlashLongTransposePipeline;
+        runtime.attentionFlashMmaTransposePipeline = attentionFlashMmaTransposePipeline;
         runtime.attentionFlashGqaPipeline = attentionFlashGqaPipeline;
         runtime.attentionFlashHalfPipeline = attentionFlashHalfPipeline;
         runtime.flashAttentionEnabled = flashAttnRequested;
@@ -721,6 +809,8 @@ static te_status te_metal_init_locked(void) {
         runtime.valueCacheBuffer = nil;
         runtime.keyCacheHalfBuffer = nil;
         runtime.valueCacheHalfBuffer = nil;
+        runtime.keyCacheTransposeBuffer = nil;
+        runtime.valueCacheTransposeBuffer = nil;
         runtime.mappingPtr = nullptr;
         runtime.mappingLen = 0;
         runtime.inputCapacity = 0;
@@ -740,6 +830,14 @@ static te_status te_metal_init_locked(void) {
         runtime.valueCacheCapacity = 0;
         runtime.keyCacheHalfCapacity = 0;
         runtime.valueCacheHalfCapacity = 0;
+        runtime.keyCacheTransposeCapacity = 0;
+        runtime.valueCacheTransposeCapacity = 0;
+        runtime.residentKvCacheValid = NO;
+        runtime.residentKvMappingPtr = nullptr;
+        runtime.residentKvLayers = 0;
+        runtime.residentKvContextTokens = 0;
+        runtime.residentKvKv = 0;
+        runtime.residentKvFilledTokens = 0;
         TE_METAL_RUNTIME = runtime;
     }
     return TE_STATUS_OK;

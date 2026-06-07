@@ -1,6 +1,10 @@
 #ifndef TINYENGINE_H
 #define TINYENGINE_H
 
+#if !defined(__APPLE__)
+#  error "TinyEngine supports Apple platforms only (requires Metal on Apple Silicon)."
+#endif
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -312,6 +316,14 @@ TE_API te_status te_context_create(
 TE_API void te_context_free(te_context *context);
 
 TE_API te_status te_generate(
+    te_context *context,
+    const char *prompt,
+    uint32_t max_tokens,
+    te_token_callback callback,
+    void *userdata
+);
+
+TE_API te_status te_generate_raw(
     te_context *context,
     const char *prompt,
     uint32_t max_tokens,

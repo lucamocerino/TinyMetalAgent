@@ -368,6 +368,14 @@ def _configure_library(lib: ctypes.CDLL) -> None:
         ctypes.c_void_p,
     ]
     lib.te_generate.restype = ctypes.c_int
+    lib.te_generate_raw.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_uint32,
+        _TOKEN_CALLBACK,
+        ctypes.c_void_p,
+    ]
+    lib.te_generate_raw.restype = ctypes.c_int
 
 
 def _check(lib: ctypes.CDLL, status: int) -> None:
@@ -618,6 +626,28 @@ class Model:
         max_tokens: int = 16,
         on_token: Optional[Callable[[str, int], None]] = None,
     ) -> str:
+        return self._run_generate(self._lib.te_generate, prompt, max_tokens, on_token)
+
+    def generate_raw(
+        self,
+        prompt: str,
+        max_tokens: int = 256,
+        on_token: Optional[Callable[[str, int], None]] = None,
+    ) -> str:
+        """Generate from a pre-formatted prompt verbatim (no chat-template wrap).
+
+        Special tokens such as ``<|im_start|>`` / ``<|im_end|>`` in ``prompt`` are
+        parsed; generation stops at EOS (``<|im_end|>``) or ``max_tokens``.
+        """
+        return self._run_generate(self._lib.te_generate_raw, prompt, max_tokens, on_token)
+
+    def _run_generate(
+        self,
+        fn: Callable[..., int],
+        prompt: str,
+        max_tokens: int,
+        on_token: Optional[Callable[[str, int], None]],
+    ) -> str:
         raw_options = self._options._to_c()
         context = ctypes.c_void_p()
         _check(
@@ -627,7 +657,7 @@ class Model:
         chunks: list[str] = []
 
         def callback(text: bytes, token_id: int, _userdata: ctypes.c_void_p) -> None:
-            chunk = text.decode()
+            chunk = text.decode(errors="replace")
             chunks.append(chunk)
             if on_token is not None:
                 on_token(chunk, token_id)
@@ -636,7 +666,7 @@ class Model:
         try:
             _check(
                 self._lib,
-                self._lib.te_generate(
+                fn(
                     context,
                     prompt.encode(),
                     max_tokens,

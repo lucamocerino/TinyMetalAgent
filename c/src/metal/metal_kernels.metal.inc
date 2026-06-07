@@ -6,7 +6,7 @@ using namespace metal;
 #define TE_THREADS 128
 #define TE_Q4_LLAMA_THREADS 64
 #define TE_Q4_LLAMA_NSG 2
-#define TE_Q4_LLAMA_ROWS_PER_SIMD 4
+#define TE_Q4_LLAMA_ROWS_PER_SIMD 1
 #define TE_Q4_LLAMA_ROW_TILE (TE_Q4_LLAMA_NSG * TE_Q4_LLAMA_ROWS_PER_SIMD)
 #define TE_Q4_BATCH_LLAMA_ROWS_PER_SIMD 4
 #define TE_Q4_BATCH_LLAMA_ROW_TILE (TE_Q4_LLAMA_NSG * TE_Q4_BATCH_LLAMA_ROWS_PER_SIMD)
@@ -692,27 +692,30 @@ kernel void te_q4_0_matmat_pair_swiglu_llama_h_f32(
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (simd_group == 0) {
-        for (int batch_col = tid; batch_col < nr1; batch_col += NR1) {
+    if ((nr0 & 3) == 0) {
+        const int vec_rows = int(nr0) / 4;
+        const int total_vec = int(nr1) * vec_rows;
+        for (int index = int(tid); index < total_vec; index += TE_THREADS) {
+            const int batch_col = index / vec_rows;
+            const int row4 = index - batch_col * vec_rows;
+            const int batch_index = r1 + batch_col;
+            threadgroup float4 *gate4 = (threadgroup float4 *)(gate_tile_base + batch_col * NR0);
+            threadgroup float4 *up4 = (threadgroup float4 *)(up_tile_base + batch_col * NR0);
+            device half4 *dst4 = (device half4 *)(out + batch_index * rows + r0);
+            const float4 g = gate4[row4];
+            dst4[row4] = half4((g / (1.0f + fast::exp(-g))) * up4[row4]);
+        }
+    } else {
+        const int total = int(nr0) * int(nr1);
+        for (int index = int(tid); index < total; index += TE_THREADS) {
+            const int batch_col = index / int(nr0);
+            const int row = index - batch_col * int(nr0);
             const int batch_index = r1 + batch_col;
             threadgroup float *gate_src = gate_tile_base + batch_col * NR0;
             threadgroup float *up_src = up_tile_base + batch_col * NR0;
             device half *dst = out + batch_index * rows + r0;
-            int row = 0;
-            if ((rows & 3) == 0) {
-                threadgroup float4 *gate4 = (threadgroup float4 *)gate_src;
-                threadgroup float4 *up4 = (threadgroup float4 *)up_src;
-                device half4 *dst4 = (device half4 *)dst;
-                for (; row < nr0 / 4; ++row) {
-                    const float4 g = gate4[row];
-                    dst4[row] = half4((g / (1.0f + exp(-g))) * up4[row]);
-                }
-                row *= 4;
-            }
-            for (; row < nr0; ++row) {
-                const float g = gate_src[row];
-                dst[row] = half((g / (1.0f + exp(-g))) * up_src[row]);
-            }
+            const float g = gate_src[row];
+            dst[row] = half((g / (1.0f + fast::exp(-g))) * up_src[row]);
         }
     }
 }
@@ -955,32 +958,36 @@ kernel void te_q4_0_matmat_h_add_llama_f32(
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float *tile_base = (threadgroup float *)shmem;
     threadgroup float *tile =
-        ((threadgroup float *)shmem) + 32 * (simd_group & 1) + (16 * (simd_group >> 1)) * NR0;
+        tile_base + 32 * (simd_group & 1) + (16 * (simd_group >> 1)) * NR0;
     TE_METAL_UNROLL for (short i = 0; i < 8; ++i) {
         simdgroup_store(acc[i], tile + 8 * (i % 4) + 8 * NR0 * (i / 4), NR0, 0, false);
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (simd_group == 0) {
-        for (int batch_col = tid; batch_col < nr1; batch_col += NR1) {
+    if ((nr0 & 3) == 0) {
+        const int vec_rows = int(nr0) / 4;
+        const int total_vec = int(nr1) * vec_rows;
+        for (int index = int(tid); index < total_vec; index += TE_THREADS) {
+            const int batch_col = index / vec_rows;
+            const int row4 = index - batch_col * vec_rows;
+            const int batch_index = r1 + batch_col;
+            threadgroup float4 *src4 = (threadgroup float4 *)(tile_base + batch_col * NR0);
+            device const float4 *residual4 = (device const float4 *)(residual + batch_index * rows + r0);
+            device float4 *dst4 = (device float4 *)(out + batch_index * rows + r0);
+            dst4[row4] = residual4[row4] + src4[row4];
+        }
+    } else {
+        const int total = int(nr0) * int(nr1);
+        for (int index = int(tid); index < total; index += TE_THREADS) {
+            const int batch_col = index / int(nr0);
+            const int row = index - batch_col * int(nr0);
             const int batch_index = r1 + batch_col;
             device const float *residual_src = residual + batch_index * rows + r0;
             device float *dst = out + batch_index * rows + r0;
-            threadgroup float *src = tile + batch_col * NR0;
-            int row = 0;
-            if ((rows & 3) == 0) {
-                threadgroup float4 *src4 = (threadgroup float4 *)src;
-                device const float4 *residual4 = (device const float4 *)residual_src;
-                device float4 *dst4 = (device float4 *)dst;
-                for (; row < nr0 / 4; ++row) {
-                    dst4[row] = residual4[row] + src4[row];
-                }
-                row *= 4;
-            }
-            for (; row < nr0; ++row) {
-                dst[row] = residual_src[row] + src[row];
-            }
+            threadgroup float *src = tile_base + batch_col * NR0;
+            dst[row] = residual_src[row] + src[row];
         }
     }
 }
@@ -1237,13 +1244,13 @@ kernel void te_q4_0_matmat_swiglu_llama_f32(
                 device float4 *dst4 = (device float4 *)dst;
                 for (; row < nr0 / 4; ++row) {
                     const float4 g = gate4[row];
-                    dst4[row] = (g / (1.0f + exp(-g))) * src4[row];
+                    dst4[row] = (g / (1.0f + fast::exp(-g))) * src4[row];
                 }
                 row *= 4;
             }
             for (; row < nr0; ++row) {
                 const float g = gate_src[row];
-                dst[row] = (g / (1.0f + exp(-g))) * src[row];
+                dst[row] = (g / (1.0f + fast::exp(-g))) * src[row];
             }
         }
     }
@@ -1352,35 +1359,38 @@ kernel void te_q4_0_matmat_swiglu_llama_h_f32(
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float *tile_base = (threadgroup float *)shmem;
     threadgroup float *tile =
-        ((threadgroup float *)shmem) + 32 * (simd_group & 1) + (16 * (simd_group >> 1)) * NR0;
+        tile_base + 32 * (simd_group & 1) + (16 * (simd_group >> 1)) * NR0;
     TE_METAL_UNROLL for (short i = 0; i < 8; ++i) {
         simdgroup_store(acc[i], tile + 8 * (i % 4) + 8 * NR0 * (i / 4), NR0, 0, false);
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (simd_group == 0) {
-        for (int batch_col = tid; batch_col < nr1; batch_col += NR1) {
+    if ((nr0 & 3) == 0) {
+        const int vec_rows = int(nr0) / 4;
+        const int total_vec = int(nr1) * vec_rows;
+        for (int index = int(tid); index < total_vec; index += TE_THREADS) {
+            const int batch_col = index / vec_rows;
+            const int row4 = index - batch_col * vec_rows;
             const int batch_index = r1 + batch_col;
-            threadgroup float *src = tile + batch_col * NR0;
+            threadgroup float4 *src4 = (threadgroup float4 *)(tile_base + batch_col * NR0);
+            device const float4 *gate4 = (device const float4 *)(gate + batch_index * rows + r0);
+            device half4 *dst4 = (device half4 *)(out + batch_index * rows + r0);
+            const float4 g = gate4[row4];
+            dst4[row4] = half4((g / (1.0f + fast::exp(-g))) * src4[row4]);
+        }
+    } else {
+        const int total = int(nr0) * int(nr1);
+        for (int index = int(tid); index < total; index += TE_THREADS) {
+            const int batch_col = index / int(nr0);
+            const int row = index - batch_col * int(nr0);
+            const int batch_index = r1 + batch_col;
+            threadgroup float *src = tile_base + batch_col * NR0;
             device const float *gate_src = gate + batch_index * rows + r0;
             device half *dst = out + batch_index * rows + r0;
-            int row = 0;
-            if ((rows & 3) == 0) {
-                threadgroup float4 *src4 = (threadgroup float4 *)src;
-                device const float4 *gate4 = (device const float4 *)gate_src;
-                device half4 *dst4 = (device half4 *)dst;
-                for (; row < nr0 / 4; ++row) {
-                    const float4 g = gate4[row];
-                    const float4 value = (g / (1.0f + exp(-g))) * src4[row];
-                    dst4[row] = half4(value);
-                }
-                row *= 4;
-            }
-            for (; row < nr0; ++row) {
-                const float g = gate_src[row];
-                dst[row] = half((g / (1.0f + exp(-g))) * src[row]);
-            }
+            const float g = gate_src[row];
+            dst[row] = half((g / (1.0f + fast::exp(-g))) * src[row]);
         }
     }
 }
@@ -1488,35 +1498,38 @@ kernel void te_q4_0_matmat_swiglu_gate_h_llama_h_f32(
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float *tile_base = (threadgroup float *)shmem;
     threadgroup float *tile =
-        ((threadgroup float *)shmem) + 32 * (simd_group & 1) + (16 * (simd_group >> 1)) * NR0;
+        tile_base + 32 * (simd_group & 1) + (16 * (simd_group >> 1)) * NR0;
     TE_METAL_UNROLL for (short i = 0; i < 8; ++i) {
         simdgroup_store(acc[i], tile + 8 * (i % 4) + 8 * NR0 * (i / 4), NR0, 0, false);
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (simd_group == 0) {
-        for (int batch_col = tid; batch_col < nr1; batch_col += NR1) {
+    if ((nr0 & 3) == 0) {
+        const int vec_rows = int(nr0) / 4;
+        const int total_vec = int(nr1) * vec_rows;
+        for (int index = int(tid); index < total_vec; index += TE_THREADS) {
+            const int batch_col = index / vec_rows;
+            const int row4 = index - batch_col * vec_rows;
             const int batch_index = r1 + batch_col;
-            threadgroup float *src = tile + batch_col * NR0;
+            threadgroup float4 *src4 = (threadgroup float4 *)(tile_base + batch_col * NR0);
+            device const half4 *gate4 = (device const half4 *)(gate + batch_index * rows + r0);
+            device half4 *dst4 = (device half4 *)(out + batch_index * rows + r0);
+            const float4 g = float4(gate4[row4]);
+            dst4[row4] = half4((g / (1.0f + fast::exp(-g))) * src4[row4]);
+        }
+    } else {
+        const int total = int(nr0) * int(nr1);
+        for (int index = int(tid); index < total; index += TE_THREADS) {
+            const int batch_col = index / int(nr0);
+            const int row = index - batch_col * int(nr0);
+            const int batch_index = r1 + batch_col;
+            threadgroup float *src = tile_base + batch_col * NR0;
             device const half *gate_src = gate + batch_index * rows + r0;
             device half *dst = out + batch_index * rows + r0;
-            int row = 0;
-            if ((rows & 3) == 0) {
-                threadgroup float4 *src4 = (threadgroup float4 *)src;
-                device const half4 *gate4 = (device const half4 *)gate_src;
-                device half4 *dst4 = (device half4 *)dst;
-                for (; row < nr0 / 4; ++row) {
-                    const float4 g = float4(gate4[row]);
-                    const float4 value = (g / (1.0f + exp(-g))) * src4[row];
-                    dst4[row] = half4(value);
-                }
-                row *= 4;
-            }
-            for (; row < nr0; ++row) {
-                const float g = float(gate_src[row]);
-                dst[row] = half((g / (1.0f + exp(-g))) * src[row]);
-            }
+            const float g = float(gate_src[row]);
+            dst[row] = half((g / (1.0f + fast::exp(-g))) * src[row]);
         }
     }
 }
@@ -2006,7 +2019,7 @@ kernel void te_swiglu_f32(
 ) {
     if (gid < len) {
         const float g = gate[gid];
-        out[gid] = (g / (1.0f + exp(-g))) * up[gid];
+        out[gid] = (g / (1.0f + fast::exp(-g))) * up[gid];
     }
 }
 
@@ -2076,6 +2089,19 @@ kernel void te_copy_f32_kernel(
 ) {
     if (gid < len) {
         out[gid] = input[gid];
+    }
+}
+
+kernel void te_touch_u8_stride(
+    device const uchar *model [[buffer(0)]],
+    device uint *out [[buffer(1)]],
+    constant uint &stride [[buffer(2)]],
+    constant uint &len [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint offset = gid * stride;
+    if (offset < len) {
+        out[gid] = (uint)model[offset];
     }
 }
 
@@ -2222,6 +2248,96 @@ kernel void te_qkv_bias_rope_cache_batch_f32(
         const float value = v[kv_batch_offset + item] + v_bias[item];
         v[kv_batch_offset + item] = value;
         value_cache[cache_offset + item] = value;
+    }
+}
+
+kernel void te_qkv_bias_rope_cache_batch_t_f32(
+    device float *q [[buffer(0)]],
+    device float *k [[buffer(1)]],
+    device float *v [[buffer(2)]],
+    device const float *q_bias [[buffer(3)]],
+    device const float *k_bias [[buffer(4)]],
+    device const float *v_bias [[buffer(5)]],
+    device const float *rope_cos [[buffer(6)]],
+    device const float *rope_sin [[buffer(7)]],
+    device float *key_cache [[buffer(8)]],
+    device float *value_cache [[buffer(9)]],
+    device float *key_cache_t [[buffer(10)]],
+    device float *value_cache_t [[buffer(11)]],
+    constant uint *dims [[buffer(12)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint batch_count = dims[0];
+    const uint base_position = dims[1];
+    const uint hidden = dims[2];
+    const uint kv = dims[3];
+    const uint heads = dims[4];
+    const uint kv_heads = dims[5];
+    const uint head_dim = dims[6];
+    const uint max_items = dims[7];
+    const uint cache_stride = dims[8] != 0u ? dims[8] : batch_count;
+    if (max_items == 0u) {
+        return;
+    }
+    const uint batch = gid / max_items;
+    const uint item = gid - batch * max_items;
+    if (batch >= batch_count) {
+        return;
+    }
+
+    const uint rope_half = head_dim / 2u;
+    const uint q_pairs = heads * rope_half;
+    const uint k_pairs = kv_heads * rope_half;
+    const uint position = base_position + batch;
+    const uint q_batch_offset = batch * hidden;
+    const uint kv_batch_offset = batch * kv;
+    const uint cache_offset = position * kv;
+    device const float *cos_row = rope_cos + position * rope_half;
+    device const float *sin_row = rope_sin + position * rope_half;
+
+    if (item < q_pairs) {
+        const uint head = item / rope_half;
+        const uint dim = item - head * rope_half;
+        const uint offset = head * head_dim + dim;
+        if (offset + rope_half < hidden) {
+            const uint index = q_batch_offset + offset;
+            const float a = q[index] + q_bias[offset];
+            const float b = q[index + rope_half] + q_bias[offset + rope_half];
+            const float c = cos_row[dim];
+            const float s = sin_row[dim];
+            q[index] = a * c - b * s;
+            q[index + rope_half] = b * c + a * s;
+        }
+    }
+
+    if (item < k_pairs) {
+        const uint head = item / rope_half;
+        const uint dim = item - head * rope_half;
+        const uint offset = head * head_dim + dim;
+        if (offset + rope_half < kv) {
+            const uint index = kv_batch_offset + offset;
+            const float a = k[index] + k_bias[offset];
+            const float b = k[index + rope_half] + k_bias[offset + rope_half];
+            const float c = cos_row[dim];
+            const float s = sin_row[dim];
+            const float lo = a * c - b * s;
+            const float hi = b * c + a * s;
+            k[index] = lo;
+            k[index + rope_half] = hi;
+            key_cache[cache_offset + offset] = lo;
+            key_cache[cache_offset + offset + rope_half] = hi;
+            key_cache_t[(head * head_dim + dim) * cache_stride + batch] = lo;
+            key_cache_t[(head * head_dim + dim + rope_half) * cache_stride + batch] = hi;
+        }
+    }
+
+    if (item < kv) {
+        const uint head = item / head_dim;
+        const uint dim = item - head * head_dim;
+        const float value = v[kv_batch_offset + item] + v_bias[item];
+        v[kv_batch_offset + item] = value;
+        value_cache[cache_offset + item] = value;
+        value_cache_t[(head * cache_stride + batch) * head_dim + dim] = value;
     }
 }
 
@@ -2380,6 +2496,342 @@ kernel void te_attention_decode_f32_kernel(
             value += scores[past] * past_v[dim];
         }
         head_out[dim] = value;
+    }
+}
+
+kernel void te_attention_qk_mma_f32_kernel(
+    device const float *query [[buffer(0)]],
+    device const float *key_t [[buffer(1)]],
+    device float *out [[buffer(2)]],
+    constant uint *dims [[buffer(3)]],
+    ushort simd_lane [[thread_index_in_simdgroup]],
+    ushort simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    const uint q_rows = dims[0];
+    const uint k_cols = dims[1];
+    const uint head_dim = dims[2];
+    if (q_rows != 8u || k_cols != 8u || head_dim != 64u || simd_group != 0u) {
+        return;
+    }
+
+    simdgroup_float8x8 mq;
+    simdgroup_float8x8 mk;
+    simdgroup_float8x8 acc = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    for (uint dim = 0u; dim < 64u; dim += 8u) {
+        simdgroup_load(mq, query + dim, 64, 0, false);
+        simdgroup_load(mk, key_t + dim * 8u, 8, 0, false);
+        simdgroup_multiply_accumulate(acc, mq, mk, acc);
+    }
+    simdgroup_store(acc, out, 8, 0, false);
+    (void)simd_lane;
+}
+
+kernel void te_attention_tile_mma_f32_kernel(
+    device const float *query [[buffer(0)]],
+    device const float *key_t [[buffer(1)]],
+    device const float *value [[buffer(2)]],
+    device float *out [[buffer(3)]],
+    constant uint *dims [[buffer(4)]],
+    uint tid [[thread_index_in_threadgroup]],
+    ushort simd_lane [[thread_index_in_simdgroup]],
+    ushort simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    const uint q_rows = dims[0];
+    const uint k_cols = dims[1];
+    const uint head_dim = dims[2];
+    if (q_rows != 8u || k_cols != 8u || head_dim != 64u) {
+        return;
+    }
+
+    threadgroup float scores[64];
+    if (simd_group == 0u) {
+        simdgroup_float8x8 mq;
+        simdgroup_float8x8 mk;
+        simdgroup_float8x8 acc = make_filled_simdgroup_matrix<float, 8>(0.0f);
+        for (uint dim = 0u; dim < 64u; dim += 8u) {
+            simdgroup_load(mq, query + dim, 64, 0, false);
+            simdgroup_load(mk, key_t + dim * 8u, 8, 0, false);
+            simdgroup_multiply_accumulate(acc, mq, mk, acc);
+        }
+        simdgroup_store(acc, scores, 8, 0, false);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float scale = rsqrt(float(head_dim));
+    for (uint q = 0u; q < 8u; ++q) {
+        if (tid == 0u) {
+            float row_max = -3.402823466e+38F;
+            for (uint k = 0u; k < 8u; ++k) {
+                const uint index = q * 8u + k;
+                scores[index] *= scale;
+                row_max = max(row_max, scores[index]);
+            }
+            float row_sum = 0.0f;
+            for (uint k = 0u; k < 8u; ++k) {
+                const uint index = q * 8u + k;
+                const float weight = exp(scores[index] - row_max);
+                scores[index] = weight;
+                row_sum += weight;
+            }
+            const float inv_sum = row_sum > 0.0f ? 1.0f / row_sum : 0.0f;
+            for (uint k = 0u; k < 8u; ++k) {
+                scores[q * 8u + k] *= inv_sum;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint dim = tid; dim < 64u; dim += TE_FLASH_ATTN_THREADS) {
+            float sum = 0.0f;
+            for (uint k = 0u; k < 8u; ++k) {
+                sum += scores[q * 8u + k] * value[k * 64u + dim];
+            }
+            out[q * 64u + dim] = sum;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    (void)simd_lane;
+}
+
+kernel void te_attention_stream_mma_f32_kernel(
+    device const float *query [[buffer(0)]],
+    device const float *key_t [[buffer(1)]],
+    device const float *value [[buffer(2)]],
+    device float *out [[buffer(3)]],
+    constant uint *dims [[buffer(4)]],
+    uint tid [[thread_index_in_threadgroup]],
+    ushort simd_lane [[thread_index_in_simdgroup]],
+    ushort simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    const uint q_rows = dims[0];
+    const uint k_cols = dims[1];
+    const uint head_dim = dims[2];
+    if (q_rows != 8u || k_cols == 0u || head_dim != 64u) {
+        return;
+    }
+
+    threadgroup float scores[64];
+    threadgroup float acc_out[8 * 64];
+    threadgroup float row_m[8];
+    threadgroup float row_l[8];
+    threadgroup float row_new_m[8];
+    threadgroup float row_block_l[8];
+    if (tid < 8u) {
+        row_m[tid] = -3.402823466e+38F;
+        row_l[tid] = 0.0f;
+    }
+    for (uint item = tid; item < 8u * 64u; item += TE_FLASH_ATTN_THREADS) {
+        acc_out[item] = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float scale = rsqrt(float(head_dim));
+    for (uint k_base = 0u; k_base < k_cols; k_base += 8u) {
+        if (simd_group == 0u) {
+            simdgroup_float8x8 mq;
+            simdgroup_float8x8 mk;
+            simdgroup_float8x8 score = make_filled_simdgroup_matrix<float, 8>(0.0f);
+            for (uint dim = 0u; dim < 64u; dim += 8u) {
+                simdgroup_load(mq, query + dim, 64, 0, false);
+                simdgroup_load(mk, key_t + dim * k_cols + k_base, k_cols, 0, false);
+                simdgroup_multiply_accumulate(score, mq, mk, score);
+            }
+            simdgroup_store(score, scores, 8, 0, false);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint q = 0u; q < 8u; ++q) {
+            if (tid == 0u) {
+                float block_max = -3.402823466e+38F;
+                for (uint k = 0u; k < 8u; ++k) {
+                    const uint index = q * 8u + k;
+                    scores[index] *= scale;
+                    block_max = max(block_max, scores[index]);
+                }
+                const float new_m = max(row_m[q], block_max);
+                float block_sum = 0.0f;
+                for (uint k = 0u; k < 8u; ++k) {
+                    const uint index = q * 8u + k;
+                    const float weight = exp(scores[index] - new_m);
+                    scores[index] = weight;
+                    block_sum += weight;
+                }
+                row_new_m[q] = new_m;
+                row_block_l[q] = block_sum;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint item = tid; item < 8u * 64u; item += TE_FLASH_ATTN_THREADS) {
+            const uint q = item / 64u;
+            const uint dim = item - q * 64u;
+            const float new_m = row_new_m[q];
+            const float alpha = exp(row_m[q] - new_m);
+            float block_acc = 0.0f;
+            for (uint k = 0u; k < 8u; ++k) {
+                block_acc += scores[q * 8u + k] * value[(k_base + k) * 64u + dim];
+            }
+            acc_out[item] = acc_out[item] * alpha + block_acc;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (tid < 8u) {
+            const float new_m = row_new_m[tid];
+            const float alpha = exp(row_m[tid] - new_m);
+            row_l[tid] = row_l[tid] * alpha + row_block_l[tid];
+            row_m[tid] = new_m;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    for (uint item = tid; item < 8u * 64u; item += TE_FLASH_ATTN_THREADS) {
+        const uint q = item / 64u;
+        out[item] = row_l[q] > 0.0f ? acc_out[item] / row_l[q] : 0.0f;
+    }
+    (void)simd_lane;
+}
+
+kernel void te_attention_flash_mma_t_f32_kernel(
+    device const float *query [[buffer(0)]],
+    device const float *key_cache [[buffer(1)]],
+    device const float *value_cache [[buffer(2)]],
+    device float *out [[buffer(3)]],
+    constant uint *dims [[buffer(4)]],
+    uint2 grid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    ushort simd_lane [[thread_index_in_simdgroup]],
+    ushort simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    const uint batch_count = dims[0];
+    const uint base_position = dims[1];
+    const uint heads = dims[2];
+    const uint kv_heads = dims[3];
+    const uint head_dim = dims[4];
+    const uint cache_tokens = dims[5];
+    const uint cache_stride = dims[6] != 0u ? dims[6] : cache_tokens;
+    const uint q_base = grid.x * 8u;
+    const uint head = grid.y;
+    if (q_base >= batch_count || head >= heads || kv_heads == 0u || (heads % kv_heads) != 0u ||
+        head_dim != 64u) {
+        return;
+    }
+
+    constexpr uint BK = 16u;
+    threadgroup float q_tile[8 * 64];
+    threadgroup float scores[8 * BK];
+    threadgroup float acc_out[8 * 64];
+    threadgroup float row_m[8];
+    threadgroup float row_l[8];
+    threadgroup float row_new_m[8];
+    threadgroup float row_block_l[8];
+
+    const uint q_count = min(8u, batch_count - q_base);
+    const uint max_position = base_position + q_base + q_count - 1u;
+    if (max_position >= cache_tokens) {
+        return;
+    }
+
+    const uint kv_repeat = heads / kv_heads;
+    const uint kv_head = head / kv_repeat;
+    device const float *head_k_cache = key_cache + kv_head * cache_stride * head_dim;
+    device const float *head_v_cache = value_cache + kv_head * cache_stride * head_dim;
+
+    for (uint item = tid; item < 8u * 64u; item += TE_FLASH_ATTN_THREADS) {
+        const uint q = item / 64u;
+        const uint dim = item - q * 64u;
+        const uint batch = q_base + q;
+        q_tile[item] = q < q_count ? query[(batch * heads + head) * head_dim + dim] : 0.0f;
+        acc_out[item] = 0.0f;
+    }
+    if (tid < 8u) {
+        row_m[tid] = -3.402823466e+38F;
+        row_l[tid] = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float scale = rsqrt(float(head_dim));
+    for (uint k_base = 0u; k_base <= max_position; k_base += BK) {
+        if (simd_group < 2u) {
+            const uint col = uint(simd_group) * 8u;
+            simdgroup_float8x8 mq;
+            simdgroup_float8x8 mk;
+            simdgroup_float8x8 score = make_filled_simdgroup_matrix<float, 8>(0.0f);
+            for (uint dim = 0u; dim < 64u; dim += 8u) {
+                simdgroup_load(mq, q_tile + dim, 64, 0, false);
+                simdgroup_load(mk, head_k_cache + dim * cache_stride + k_base + col, cache_stride, 0, false);
+                simdgroup_multiply_accumulate(score, mq, mk, score);
+            }
+            simdgroup_store(score, scores + col, BK, 0, false);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint item = tid; item < 8u * BK; item += TE_FLASH_ATTN_THREADS) {
+            const uint q = item / BK;
+            const uint k = item - q * BK;
+            const uint past = k_base + k;
+            const uint position = base_position + q_base + q;
+            scores[item] = (q < q_count && past <= position && past < cache_tokens)
+                ? scores[item] * scale
+                : -3.402823466e+38F;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint q = uint(simd_group); q < q_count; q += TE_FLASH_ATTN_SIMDGROUPS) {
+            float local_max = -3.402823466e+38F;
+            for (uint k = simd_lane; k < BK; k += 32u) {
+                local_max = max(local_max, scores[q * BK + k]);
+            }
+            const float block_max = simd_max(local_max);
+            if (simd_lane == 0u) {
+                row_new_m[q] = max(row_m[q], block_max);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint q = uint(simd_group); q < q_count; q += TE_FLASH_ATTN_SIMDGROUPS) {
+            const float new_m = row_new_m[q];
+            float local_sum = 0.0f;
+            for (uint k = simd_lane; k < BK; k += 32u) {
+                const uint index = q * BK + k;
+                const float weight = exp(scores[index] - new_m);
+                scores[index] = weight;
+                local_sum += weight;
+            }
+            const float block_l = simd_sum(local_sum);
+            if (simd_lane == 0u) {
+                row_block_l[q] = block_l;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint item = tid; item < q_count * 64u; item += TE_FLASH_ATTN_THREADS) {
+            const uint q = item / 64u;
+            const uint dim = item - q * 64u;
+            const float alpha = exp(row_m[q] - row_new_m[q]);
+            float block_acc = 0.0f;
+            const uint position = base_position + q_base + q;
+            for (uint k = 0u; k < BK; ++k) {
+                const uint past = k_base + k;
+                if (past <= position && past < cache_tokens) {
+                    block_acc += scores[q * BK + k] * head_v_cache[past * head_dim + dim];
+                }
+            }
+            acc_out[item] = acc_out[item] * alpha + block_acc;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (tid < q_count) {
+            const float alpha = exp(row_m[tid] - row_new_m[tid]);
+            row_l[tid] = row_l[tid] * alpha + row_block_l[tid];
+            row_m[tid] = row_new_m[tid];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    for (uint item = tid; item < q_count * 64u; item += TE_FLASH_ATTN_THREADS) {
+        const uint q = item / 64u;
+        const uint dim = item - q * 64u;
+        const uint batch = q_base + q;
+        out[(batch * heads + head) * head_dim + dim] = row_l[q] > 0.0f ? acc_out[item] / row_l[q] : 0.0f;
     }
 }
 
@@ -2614,6 +3066,131 @@ kernel void te_attention_flash_t128_f32_kernel(
                 const uint past = block_start + local;
                 if (past <= position && past < cache_tokens) {
                     device const float *past_v = value_cache + (past * kv_heads + kv_head) * head_dim;
+                    block_acc += scores[local] * past_v[tid];
+                }
+            }
+            acc = acc * alpha + block_acc;
+        }
+        l = l * alpha + shared[1];
+        m = new_m;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid < head_dim) {
+        head_out[tid] = l > 0.0f ? acc / l : 0.0f;
+    }
+}
+
+kernel void te_attention_flash_t128_t_f32_kernel(
+    device const float *query [[buffer(0)]],
+    device const float *key_cache [[buffer(1)]],
+    device const float *value_cache [[buffer(2)]],
+    device float *out [[buffer(3)]],
+    constant uint *dims [[buffer(4)]],
+    uint2 grid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    const uint batch_count = dims[0];
+    const uint base_position = dims[1];
+    const uint heads = dims[2];
+    const uint kv_heads = dims[3];
+    const uint head_dim = dims[4];
+    const uint cache_tokens = dims[5];
+    const uint cache_stride = dims[6] != 0u ? dims[6] : cache_tokens;
+    const uint batch = grid.x;
+    const uint head = grid.y;
+    if (batch >= batch_count || head >= heads || kv_heads == 0u || (heads % kv_heads) != 0u) {
+        return;
+    }
+    const uint position = base_position + batch;
+    if (position >= cache_tokens || head_dim == 0u || head_dim > TE_FLASH_ATTN_THREADS) {
+        return;
+    }
+
+    threadgroup float scores[TE_FLASH_ATTN_TILE_LONG];
+    threadgroup float partial[TE_FLASH_ATTN_SIMDGROUPS];
+    threadgroup float shared[2];
+
+    const uint kv_repeat = heads / kv_heads;
+    const uint kv_head = head / kv_repeat;
+    const float scale = rsqrt(float(head_dim));
+    device const float *head_q = query + batch * heads * head_dim + head * head_dim;
+    device const float *head_k_cache = key_cache + kv_head * cache_stride * head_dim;
+    device const float *head_v_cache = value_cache + kv_head * cache_stride * head_dim;
+    device float *head_out = out + batch * heads * head_dim + head * head_dim;
+
+    float m = -3.402823466e+38F;
+    float l = 0.0f;
+    float acc = 0.0f;
+
+    for (uint block_start = 0u; block_start <= position; block_start += TE_FLASH_ATTN_TILE_LONG) {
+        for (uint local = simd_group; local < TE_FLASH_ATTN_TILE_LONG; local += TE_FLASH_ATTN_SIMDGROUPS) {
+            const uint past = block_start + local;
+            float dot = 0.0f;
+            if (past <= position && past < cache_tokens) {
+                for (uint dim = simd_lane; dim < head_dim; dim += 32u) {
+                    dot += head_q[dim] * head_k_cache[dim * cache_stride + past];
+                }
+                dot = simd_sum(dot) * scale;
+            } else {
+                dot = -3.402823466e+38F;
+            }
+            if (simd_lane == 0u) {
+                scores[local] = dot;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float local_max = -3.402823466e+38F;
+        for (uint local = tid; local < TE_FLASH_ATTN_TILE_LONG; local += TE_FLASH_ATTN_THREADS) {
+            local_max = max(local_max, scores[local]);
+        }
+        const float group_max = simd_max(local_max);
+        if (simd_lane == 0u) {
+            partial[simd_group] = group_max;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (tid == 0u) {
+            float block_max = partial[0];
+            for (uint group = 1u; group < TE_FLASH_ATTN_SIMDGROUPS; ++group) {
+                block_max = max(block_max, partial[group]);
+            }
+            shared[0] = max(m, block_max);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        const float new_m = shared[0];
+        float local_sum = 0.0f;
+        for (uint local = tid; local < TE_FLASH_ATTN_TILE_LONG; local += TE_FLASH_ATTN_THREADS) {
+            const float weight = exp(scores[local] - new_m);
+            scores[local] = weight;
+            local_sum += weight;
+        }
+        const float group_sum = simd_sum(local_sum);
+        if (simd_lane == 0u) {
+            partial[simd_group] = group_sum;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (tid == 0u) {
+            float block_sum = 0.0f;
+            for (uint group = 0u; group < TE_FLASH_ATTN_SIMDGROUPS; ++group) {
+                block_sum += partial[group];
+            }
+            shared[1] = block_sum;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        const float alpha = exp(m - new_m);
+        if (tid < head_dim) {
+            float block_acc = 0.0f;
+            for (uint local = 0u; local < TE_FLASH_ATTN_TILE_LONG; ++local) {
+                const uint past = block_start + local;
+                if (past <= position && past < cache_tokens) {
+                    device const float *past_v = head_v_cache + past * head_dim;
                     block_acc += scores[local] * past_v[tid];
                 }
             }

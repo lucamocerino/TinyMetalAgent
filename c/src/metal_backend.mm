@@ -1,6 +1,5 @@
 #include "metal_backend.h"
 
-#if defined(__APPLE__)
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
@@ -10,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define TE_METAL_GGML_TYPE_Q4_0 2u
 #define TE_METAL_GGML_TYPE_Q8_0 8u
@@ -21,6 +21,351 @@ static NSString *const TE_METAL_SOURCE =
 // Runtime state and tuning gates stay in this translation unit because most
 // dispatch entry points use the same static helpers and cached Metal objects.
 #include "metal/metal_backend_runtime.mm.inc"
+
+te_status te_metal_attention_qk_mma_f32(
+    const float *query,
+    const float *key_t,
+    size_t q_rows,
+    size_t k_cols,
+    size_t head_dim,
+    float *out
+) {
+    if (!te_metal_enabled()) {
+        return TE_STATUS_UNSUPPORTED;
+    }
+    if (query == nullptr || key_t == nullptr || out == nullptr || q_rows == 0 || k_cols == 0 || head_dim == 0) {
+        return TE_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_rows != 8u || k_cols != 8u || head_dim != 64u) {
+        return TE_STATUS_UNSUPPORTED;
+    }
+    @autoreleasepool {
+        std::lock_guard<std::mutex> lock(TE_METAL_MUTEX);
+        te_status status = te_metal_init_locked();
+        if (status != TE_STATUS_OK) {
+            return status;
+        }
+        TEMetalRuntime *runtime = TE_METAL_RUNTIME;
+        const size_t query_bytes = q_rows * head_dim * sizeof(float);
+        const size_t key_bytes = head_dim * k_cols * sizeof(float);
+        const size_t out_bytes = q_rows * k_cols * sizeof(float);
+        if (runtime.inputBuffer == nil || runtime.inputCapacity < query_bytes) {
+            runtime.inputBuffer = [runtime.device newBufferWithLength:query_bytes
+                                                              options:MTLResourceStorageModeShared];
+            runtime.inputCapacity = query_bytes;
+        }
+        if (runtime.output2Buffer == nil || runtime.output2Capacity < key_bytes) {
+            runtime.output2Buffer = [runtime.device newBufferWithLength:key_bytes
+                                                                options:MTLResourceStorageModeShared];
+            runtime.output2Capacity = key_bytes;
+        }
+        if (runtime.outputBuffer == nil || runtime.outputCapacity < out_bytes) {
+            runtime.outputBuffer = [runtime.device newBufferWithLength:out_bytes
+                                                               options:MTLResourceStorageModeShared];
+            runtime.outputCapacity = out_bytes;
+        }
+        if (runtime.inputBuffer == nil || runtime.output2Buffer == nil || runtime.outputBuffer == nil ||
+            runtime.attentionQkMmaPipeline == nil) {
+            return TE_STATUS_OUT_OF_MEMORY;
+        }
+        memcpy([runtime.inputBuffer contents], query, query_bytes);
+        memcpy([runtime.output2Buffer contents], key_t, key_bytes);
+
+        const uint32_t dims[3] = {(uint32_t)q_rows, (uint32_t)k_cols, (uint32_t)head_dim};
+        id<MTLCommandBuffer> commandBuffer = [runtime.queue commandBuffer];
+        if (commandBuffer == nil) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+        if (encoder == nil) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        [encoder setComputePipelineState:runtime.attentionQkMmaPipeline];
+        [encoder setBuffer:runtime.inputBuffer offset:0 atIndex:0];
+        [encoder setBuffer:runtime.output2Buffer offset:0 atIndex:1];
+        [encoder setBuffer:runtime.outputBuffer offset:0 atIndex:2];
+        [encoder setBytes:dims length:sizeof(dims) atIndex:3];
+        [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(TE_METAL_FLASH_ATTENTION_THREADS, 1, 1)];
+        [encoder endEncoding];
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+        if (commandBuffer.status != MTLCommandBufferStatusCompleted) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        memcpy(out, [runtime.outputBuffer contents], out_bytes);
+        return TE_STATUS_OK;
+    }
+}
+
+te_status te_metal_attention_tile_mma_f32(
+    const float *query,
+    const float *key_t,
+    const float *value,
+    size_t q_rows,
+    size_t k_cols,
+    size_t head_dim,
+    float *out
+) {
+    if (!te_metal_enabled()) {
+        return TE_STATUS_UNSUPPORTED;
+    }
+    if (query == nullptr || key_t == nullptr || value == nullptr || out == nullptr ||
+        q_rows == 0 || k_cols == 0 || head_dim == 0) {
+        return TE_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_rows != 8u || k_cols != 8u || head_dim != 64u) {
+        return TE_STATUS_UNSUPPORTED;
+    }
+
+    @autoreleasepool {
+        std::lock_guard<std::mutex> lock(TE_METAL_MUTEX);
+        te_status status = te_metal_init_locked();
+        if (status != TE_STATUS_OK) {
+            return status;
+        }
+        TEMetalRuntime *runtime = TE_METAL_RUNTIME;
+        const size_t query_bytes = q_rows * head_dim * sizeof(float);
+        const size_t key_bytes = head_dim * k_cols * sizeof(float);
+        const size_t value_bytes = k_cols * head_dim * sizeof(float);
+        const size_t out_bytes = q_rows * head_dim * sizeof(float);
+        if (runtime.inputBuffer == nil || runtime.inputCapacity < query_bytes) {
+            runtime.inputBuffer = [runtime.device newBufferWithLength:query_bytes
+                                                              options:MTLResourceStorageModeShared];
+            runtime.inputCapacity = query_bytes;
+        }
+        if (runtime.output2Buffer == nil || runtime.output2Capacity < key_bytes) {
+            runtime.output2Buffer = [runtime.device newBufferWithLength:key_bytes
+                                                                options:MTLResourceStorageModeShared];
+            runtime.output2Capacity = key_bytes;
+        }
+        if (runtime.scratchBuffer == nil || runtime.scratchCapacity < value_bytes) {
+            runtime.scratchBuffer = [runtime.device newBufferWithLength:value_bytes
+                                                                options:MTLResourceStorageModeShared];
+            runtime.scratchCapacity = value_bytes;
+        }
+        if (runtime.outputBuffer == nil || runtime.outputCapacity < out_bytes) {
+            runtime.outputBuffer = [runtime.device newBufferWithLength:out_bytes
+                                                               options:MTLResourceStorageModeShared];
+            runtime.outputCapacity = out_bytes;
+        }
+        if (runtime.inputBuffer == nil || runtime.output2Buffer == nil || runtime.scratchBuffer == nil ||
+            runtime.outputBuffer == nil || runtime.attentionTileMmaPipeline == nil) {
+            return TE_STATUS_OUT_OF_MEMORY;
+        }
+        memcpy([runtime.inputBuffer contents], query, query_bytes);
+        memcpy([runtime.output2Buffer contents], key_t, key_bytes);
+        memcpy([runtime.scratchBuffer contents], value, value_bytes);
+
+        const uint32_t dims[3] = {(uint32_t)q_rows, (uint32_t)k_cols, (uint32_t)head_dim};
+        id<MTLCommandBuffer> commandBuffer = [runtime.queue commandBuffer];
+        if (commandBuffer == nil) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+        if (encoder == nil) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        [encoder setComputePipelineState:runtime.attentionTileMmaPipeline];
+        [encoder setBuffer:runtime.inputBuffer offset:0 atIndex:0];
+        [encoder setBuffer:runtime.output2Buffer offset:0 atIndex:1];
+        [encoder setBuffer:runtime.scratchBuffer offset:0 atIndex:2];
+        [encoder setBuffer:runtime.outputBuffer offset:0 atIndex:3];
+        [encoder setBytes:dims length:sizeof(dims) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(TE_METAL_FLASH_ATTENTION_THREADS, 1, 1)];
+        [encoder endEncoding];
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+        if (commandBuffer.status != MTLCommandBufferStatusCompleted) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        memcpy(out, [runtime.outputBuffer contents], out_bytes);
+        return TE_STATUS_OK;
+    }
+}
+
+te_status te_metal_attention_stream_mma_f32(
+    const float *query,
+    const float *key_t,
+    const float *value,
+    size_t q_rows,
+    size_t k_cols,
+    size_t head_dim,
+    float *out
+) {
+    if (!te_metal_enabled()) {
+        return TE_STATUS_UNSUPPORTED;
+    }
+    if (query == nullptr || key_t == nullptr || value == nullptr || out == nullptr ||
+        q_rows == 0 || k_cols == 0 || head_dim == 0) {
+        return TE_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_rows != 8u || k_cols == 0u || (k_cols % 8u) != 0u || head_dim != 64u) {
+        return TE_STATUS_UNSUPPORTED;
+    }
+
+    @autoreleasepool {
+        std::lock_guard<std::mutex> lock(TE_METAL_MUTEX);
+        te_status status = te_metal_init_locked();
+        if (status != TE_STATUS_OK) {
+            return status;
+        }
+        TEMetalRuntime *runtime = TE_METAL_RUNTIME;
+        const size_t query_bytes = q_rows * head_dim * sizeof(float);
+        const size_t key_bytes = head_dim * k_cols * sizeof(float);
+        const size_t value_bytes = k_cols * head_dim * sizeof(float);
+        const size_t out_bytes = q_rows * head_dim * sizeof(float);
+        if (runtime.inputBuffer == nil || runtime.inputCapacity < query_bytes) {
+            runtime.inputBuffer = [runtime.device newBufferWithLength:query_bytes
+                                                              options:MTLResourceStorageModeShared];
+            runtime.inputCapacity = query_bytes;
+        }
+        if (runtime.output2Buffer == nil || runtime.output2Capacity < key_bytes) {
+            runtime.output2Buffer = [runtime.device newBufferWithLength:key_bytes
+                                                                options:MTLResourceStorageModeShared];
+            runtime.output2Capacity = key_bytes;
+        }
+        if (runtime.scratchBuffer == nil || runtime.scratchCapacity < value_bytes) {
+            runtime.scratchBuffer = [runtime.device newBufferWithLength:value_bytes
+                                                                options:MTLResourceStorageModeShared];
+            runtime.scratchCapacity = value_bytes;
+        }
+        if (runtime.outputBuffer == nil || runtime.outputCapacity < out_bytes) {
+            runtime.outputBuffer = [runtime.device newBufferWithLength:out_bytes
+                                                               options:MTLResourceStorageModeShared];
+            runtime.outputCapacity = out_bytes;
+        }
+        if (runtime.inputBuffer == nil || runtime.output2Buffer == nil || runtime.scratchBuffer == nil ||
+            runtime.outputBuffer == nil || runtime.attentionStreamMmaPipeline == nil) {
+            return TE_STATUS_OUT_OF_MEMORY;
+        }
+        memcpy([runtime.inputBuffer contents], query, query_bytes);
+        memcpy([runtime.output2Buffer contents], key_t, key_bytes);
+        memcpy([runtime.scratchBuffer contents], value, value_bytes);
+
+        const uint32_t dims[3] = {(uint32_t)q_rows, (uint32_t)k_cols, (uint32_t)head_dim};
+        id<MTLCommandBuffer> commandBuffer = [runtime.queue commandBuffer];
+        if (commandBuffer == nil) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+        if (encoder == nil) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        [encoder setComputePipelineState:runtime.attentionStreamMmaPipeline];
+        [encoder setBuffer:runtime.inputBuffer offset:0 atIndex:0];
+        [encoder setBuffer:runtime.output2Buffer offset:0 atIndex:1];
+        [encoder setBuffer:runtime.scratchBuffer offset:0 atIndex:2];
+        [encoder setBuffer:runtime.outputBuffer offset:0 atIndex:3];
+        [encoder setBytes:dims length:sizeof(dims) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(TE_METAL_FLASH_ATTENTION_THREADS, 1, 1)];
+        [encoder endEncoding];
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+        if (commandBuffer.status != MTLCommandBufferStatusCompleted) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        memcpy(out, [runtime.outputBuffer contents], out_bytes);
+        return TE_STATUS_OK;
+    }
+}
+
+te_status te_metal_attention_causal_mma_f32(
+    const float *query,
+    const float *key_t,
+    const float *value,
+    size_t q_rows,
+    size_t k_cols,
+    size_t head_dim,
+    size_t q_base,
+    float *out
+) {
+    if (!te_metal_enabled()) {
+        return TE_STATUS_UNSUPPORTED;
+    }
+    if (query == nullptr || key_t == nullptr || value == nullptr || out == nullptr ||
+        q_rows == 0 || k_cols == 0 || head_dim == 0) {
+        return TE_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_rows != 8u || k_cols == 0u || (k_cols % 8u) != 0u || head_dim != 64u || q_base > k_cols) {
+        return TE_STATUS_UNSUPPORTED;
+    }
+
+    @autoreleasepool {
+        std::lock_guard<std::mutex> lock(TE_METAL_MUTEX);
+        te_status status = te_metal_init_locked();
+        if (status != TE_STATUS_OK) {
+            return status;
+        }
+        TEMetalRuntime *runtime = TE_METAL_RUNTIME;
+        const size_t query_bytes = q_rows * head_dim * sizeof(float);
+        const size_t key_bytes = head_dim * k_cols * sizeof(float);
+        const size_t value_bytes = k_cols * head_dim * sizeof(float);
+        const size_t out_bytes = q_rows * head_dim * sizeof(float);
+        if (runtime.inputBuffer == nil || runtime.inputCapacity < query_bytes) {
+            runtime.inputBuffer = [runtime.device newBufferWithLength:query_bytes
+                                                              options:MTLResourceStorageModeShared];
+            runtime.inputCapacity = query_bytes;
+        }
+        if (runtime.output2Buffer == nil || runtime.output2Capacity < key_bytes) {
+            runtime.output2Buffer = [runtime.device newBufferWithLength:key_bytes
+                                                                options:MTLResourceStorageModeShared];
+            runtime.output2Capacity = key_bytes;
+        }
+        if (runtime.scratchBuffer == nil || runtime.scratchCapacity < value_bytes) {
+            runtime.scratchBuffer = [runtime.device newBufferWithLength:value_bytes
+                                                                options:MTLResourceStorageModeShared];
+            runtime.scratchCapacity = value_bytes;
+        }
+        if (runtime.outputBuffer == nil || runtime.outputCapacity < out_bytes) {
+            runtime.outputBuffer = [runtime.device newBufferWithLength:out_bytes
+                                                               options:MTLResourceStorageModeShared];
+            runtime.outputCapacity = out_bytes;
+        }
+        if (runtime.inputBuffer == nil || runtime.output2Buffer == nil || runtime.scratchBuffer == nil ||
+            runtime.outputBuffer == nil || runtime.attentionFlashMmaTransposePipeline == nil) {
+            return TE_STATUS_OUT_OF_MEMORY;
+        }
+        memcpy([runtime.inputBuffer contents], query, query_bytes);
+        memcpy([runtime.output2Buffer contents], key_t, key_bytes);
+        memcpy([runtime.scratchBuffer contents], value, value_bytes);
+
+        const uint32_t dims[7] = {
+            (uint32_t)q_rows,
+            (uint32_t)q_base,
+            1u,
+            1u,
+            (uint32_t)head_dim,
+            (uint32_t)k_cols,
+            (uint32_t)k_cols};
+        id<MTLCommandBuffer> commandBuffer = [runtime.queue commandBuffer];
+        if (commandBuffer == nil) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+        if (encoder == nil) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        [encoder setComputePipelineState:runtime.attentionFlashMmaTransposePipeline];
+        [encoder setBuffer:runtime.inputBuffer offset:0 atIndex:0];
+        [encoder setBuffer:runtime.output2Buffer offset:0 atIndex:1];
+        [encoder setBuffer:runtime.scratchBuffer offset:0 atIndex:2];
+        [encoder setBuffer:runtime.outputBuffer offset:0 atIndex:3];
+        [encoder setBytes:dims length:sizeof(dims) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(TE_METAL_FLASH_ATTENTION_THREADS, 1, 1)];
+        [encoder endEncoding];
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+        if (commandBuffer.status != MTLCommandBufferStatusCompleted) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        memcpy(out, [runtime.outputBuffer contents], out_bytes);
+        return TE_STATUS_OK;
+    }
+}
 
 te_status te_metal_matvec_batch_f32(
     const void *mapping,
@@ -1532,579 +1877,3 @@ te_status te_metal_matvec_f32(
         return TE_STATUS_OK;
     }
 }
-
-#else
-
-// Non-Apple builds keep the same public ABI and explicitly report unsupported
-// for every Metal entry point.
-
-te_status te_metal_matvec_f32(
-    const void *mapping,
-    size_t mapping_len,
-    uint64_t tensor_offset,
-    uint32_t ggml_type,
-    const float *input,
-    size_t cols,
-    size_t rows,
-    float *out
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)tensor_offset;
-    (void)ggml_type;
-    (void)input;
-    (void)cols;
-    (void)rows;
-    (void)out;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-te_status te_metal_matvec_argmax_f32(
-    const void *mapping,
-    size_t mapping_len,
-    uint64_t tensor_offset,
-    uint32_t ggml_type,
-    const float *input,
-    size_t cols,
-    size_t rows,
-    uint32_t *out_index
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)tensor_offset;
-    (void)ggml_type;
-    (void)input;
-    (void)cols;
-    (void)rows;
-    (void)out_index;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-te_status te_metal_project_argmax_f32(
-    const void *mapping,
-    size_t mapping_len,
-    uint64_t tensor_offset,
-    uint32_t ggml_type,
-    const float *hidden_in,
-    const float *norm_weight,
-    size_t cols,
-    size_t rows,
-    float epsilon,
-    uint32_t *out_index
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)tensor_offset;
-    (void)ggml_type;
-    (void)hidden_in;
-    (void)norm_weight;
-    (void)cols;
-    (void)rows;
-    (void)epsilon;
-    (void)out_index;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-te_status te_metal_matvec2_f32(
-    const void *mapping,
-    size_t mapping_len,
-    uint64_t tensor_a_offset,
-    uint64_t tensor_b_offset,
-    uint32_t ggml_type,
-    const float *input,
-    size_t cols,
-    size_t rows,
-    float *out_a,
-    float *out_b
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)tensor_a_offset;
-    (void)tensor_b_offset;
-    (void)ggml_type;
-    (void)input;
-    (void)cols;
-    (void)rows;
-    (void)out_a;
-    (void)out_b;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-te_status te_metal_matvec_batch_f32(
-    const void *mapping,
-    size_t mapping_len,
-    uint64_t tensor_offset,
-    uint32_t ggml_type,
-    const float *input,
-    size_t batch,
-    size_t cols,
-    size_t rows,
-    float *out
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)tensor_offset;
-    (void)ggml_type;
-    (void)input;
-    (void)batch;
-    (void)cols;
-    (void)rows;
-    (void)out;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-te_status te_metal_qkv_f32(
-    const void *mapping,
-    size_t mapping_len,
-    uint64_t q_offset,
-    uint64_t k_offset,
-    uint64_t v_offset,
-    uint32_t ggml_type,
-    const float *input,
-    size_t hidden,
-    size_t kv,
-    float *q_out,
-    float *k_out,
-    float *v_out
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)q_offset;
-    (void)k_offset;
-    (void)v_offset;
-    (void)ggml_type;
-    (void)input;
-    (void)hidden;
-    (void)kv;
-    (void)q_out;
-    (void)k_out;
-    (void)v_out;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-te_status te_metal_qkv_batch_f32(
-    const void *mapping,
-    size_t mapping_len,
-    uint64_t q_offset,
-    uint64_t k_offset,
-    uint64_t v_offset,
-    uint32_t ggml_type,
-    const float *input,
-    size_t batch,
-    size_t hidden,
-    size_t kv,
-    float *q_out,
-    float *k_out,
-    float *v_out
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)q_offset;
-    (void)k_offset;
-    (void)v_offset;
-    (void)ggml_type;
-    (void)input;
-    (void)batch;
-    (void)hidden;
-    (void)kv;
-    (void)q_out;
-    (void)k_out;
-    (void)v_out;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-te_status te_metal_mlp_f32(
-    const void *mapping,
-    size_t mapping_len,
-    uint64_t gate_offset,
-    uint64_t up_offset,
-    uint64_t down_offset,
-    uint32_t ggml_type,
-    const float *input,
-    size_t hidden,
-    size_t ffn,
-    float *out
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)gate_offset;
-    (void)up_offset;
-    (void)down_offset;
-    (void)ggml_type;
-    (void)input;
-    (void)hidden;
-    (void)ffn;
-    (void)out;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-te_status te_metal_mlp_batch_f32(
-    const void *mapping,
-    size_t mapping_len,
-    uint64_t gate_offset,
-    uint64_t up_offset,
-    uint64_t down_offset,
-    uint32_t ggml_type,
-    const float *input,
-    size_t batch,
-    size_t hidden,
-    size_t ffn,
-    float *out
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)gate_offset;
-    (void)up_offset;
-    (void)down_offset;
-    (void)ggml_type;
-    (void)input;
-    (void)batch;
-    (void)hidden;
-    (void)ffn;
-    (void)out;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-te_status te_metal_post_attn_mlp_f32(
-    const void *mapping,
-    size_t mapping_len,
-    uint64_t output_offset,
-    uint64_t gate_offset,
-    uint64_t up_offset,
-    uint64_t down_offset,
-    uint32_t ggml_type,
-    const float *hidden_in,
-    const float *attn,
-    const float *ffn_norm_weight,
-    size_t hidden,
-    size_t ffn,
-    float epsilon,
-    float *out
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)output_offset;
-    (void)gate_offset;
-    (void)up_offset;
-    (void)down_offset;
-    (void)ggml_type;
-    (void)hidden_in;
-    (void)attn;
-    (void)ffn_norm_weight;
-    (void)hidden;
-    (void)ffn;
-    (void)epsilon;
-    (void)out;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-te_status te_metal_post_attn_mlp_batch_f32(
-    const void *mapping,
-    size_t mapping_len,
-    uint64_t output_offset,
-    uint64_t gate_offset,
-    uint64_t up_offset,
-    uint64_t down_offset,
-    uint32_t ggml_type,
-    const float *hidden_in,
-    const float *attn,
-    const float *ffn_norm_weight,
-    size_t batch,
-    size_t hidden,
-    size_t ffn,
-    float epsilon,
-    float *out
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)output_offset;
-    (void)gate_offset;
-    (void)up_offset;
-    (void)down_offset;
-    (void)ggml_type;
-    (void)hidden_in;
-    (void)attn;
-    (void)ffn_norm_weight;
-    (void)batch;
-    (void)hidden;
-    (void)ffn;
-    (void)epsilon;
-    (void)out;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-te_status te_metal_decode_layer_f32(
-    const void *mapping,
-    size_t mapping_len,
-    uint64_t q_offset,
-    uint64_t k_offset,
-    uint64_t v_offset,
-    uint64_t output_offset,
-    uint64_t gate_offset,
-    uint64_t up_offset,
-    uint64_t down_offset,
-    uint32_t ggml_type,
-    const float *hidden_in,
-    const float *attn_norm_weight,
-    const float *ffn_norm_weight,
-    const float *q_bias,
-    const float *k_bias,
-    const float *v_bias,
-    const float *rope_cos,
-    const float *rope_sin,
-    float *key_cache,
-    float *value_cache,
-    size_t position,
-    size_t context_tokens,
-    size_t hidden,
-    size_t kv,
-    size_t heads,
-    size_t kv_heads,
-    size_t head_dim,
-    size_t ffn,
-    float epsilon,
-    float *out
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)q_offset;
-    (void)k_offset;
-    (void)v_offset;
-    (void)output_offset;
-    (void)gate_offset;
-    (void)up_offset;
-    (void)down_offset;
-    (void)ggml_type;
-    (void)hidden_in;
-    (void)attn_norm_weight;
-    (void)ffn_norm_weight;
-    (void)q_bias;
-    (void)k_bias;
-    (void)v_bias;
-    (void)rope_cos;
-    (void)rope_sin;
-    (void)key_cache;
-    (void)value_cache;
-    (void)position;
-    (void)context_tokens;
-    (void)hidden;
-    (void)kv;
-    (void)heads;
-    (void)kv_heads;
-    (void)head_dim;
-    (void)ffn;
-    (void)epsilon;
-    (void)out;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-te_status te_metal_decode_all_layers_f32(
-    const void *mapping,
-    size_t mapping_len,
-    const uint64_t *q_offsets,
-    const uint64_t *k_offsets,
-    const uint64_t *v_offsets,
-    const uint64_t *output_offsets,
-    const uint64_t *gate_offsets,
-    const uint64_t *up_offsets,
-    const uint64_t *down_offsets,
-    size_t layers,
-    uint32_t ggml_type,
-    const float *hidden_in,
-    const float *attn_norm_weights,
-    const float *ffn_norm_weights,
-    const float *q_biases,
-    const float *k_biases,
-    const float *v_biases,
-    const float *rope_cos,
-    const float *rope_sin,
-    float *key_cache,
-    float *value_cache,
-    size_t position,
-    size_t context_tokens,
-    size_t hidden,
-    size_t kv,
-    size_t heads,
-    size_t kv_heads,
-    size_t head_dim,
-    size_t ffn,
-    float epsilon,
-    float *out,
-    uint64_t head_offset,
-    uint32_t head_ggml_type,
-    const float *output_norm_weight,
-    size_t vocab,
-    uint32_t *out_token_id
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)q_offsets;
-    (void)k_offsets;
-    (void)v_offsets;
-    (void)output_offsets;
-    (void)gate_offsets;
-    (void)up_offsets;
-    (void)down_offsets;
-    (void)layers;
-    (void)ggml_type;
-    (void)hidden_in;
-    (void)attn_norm_weights;
-    (void)ffn_norm_weights;
-    (void)q_biases;
-    (void)k_biases;
-    (void)v_biases;
-    (void)rope_cos;
-    (void)rope_sin;
-    (void)key_cache;
-    (void)value_cache;
-    (void)position;
-    (void)context_tokens;
-    (void)hidden;
-    (void)kv;
-    (void)heads;
-    (void)kv_heads;
-    (void)head_dim;
-    (void)ffn;
-    (void)epsilon;
-    (void)out;
-    (void)head_offset;
-    (void)head_ggml_type;
-    (void)output_norm_weight;
-    (void)vocab;
-    (void)out_token_id;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-te_status te_metal_prefill_layer_f32(
-    const void *mapping,
-    size_t mapping_len,
-    uint64_t q_offset,
-    uint64_t k_offset,
-    uint64_t v_offset,
-    uint64_t output_offset,
-    uint64_t gate_offset,
-    uint64_t up_offset,
-    uint64_t down_offset,
-    uint32_t ggml_type,
-    const float *hidden_in,
-    const float *attn_norm_weight,
-    const float *ffn_norm_weight,
-    const float *q_bias,
-    const float *k_bias,
-    const float *v_bias,
-    const float *rope_cos,
-    const float *rope_sin,
-    float *key_cache,
-    float *value_cache,
-    size_t batch,
-    size_t context_tokens,
-    size_t hidden,
-    size_t kv,
-    size_t heads,
-    size_t kv_heads,
-    size_t head_dim,
-    size_t ffn,
-    float epsilon,
-    float *out
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)q_offset;
-    (void)k_offset;
-    (void)v_offset;
-    (void)output_offset;
-    (void)gate_offset;
-    (void)up_offset;
-    (void)down_offset;
-    (void)ggml_type;
-    (void)hidden_in;
-    (void)attn_norm_weight;
-    (void)ffn_norm_weight;
-    (void)q_bias;
-    (void)k_bias;
-    (void)v_bias;
-    (void)rope_cos;
-    (void)rope_sin;
-    (void)key_cache;
-    (void)value_cache;
-    (void)batch;
-    (void)context_tokens;
-    (void)hidden;
-    (void)kv;
-    (void)heads;
-    (void)kv_heads;
-    (void)head_dim;
-    (void)ffn;
-    (void)epsilon;
-    (void)out;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-te_status te_metal_prefill_all_layers_f32(
-    const void *mapping,
-    size_t mapping_len,
-    const uint64_t *q_offsets,
-    const uint64_t *k_offsets,
-    const uint64_t *v_offsets,
-    const uint64_t *output_offsets,
-    const uint64_t *gate_offsets,
-    const uint64_t *up_offsets,
-    const uint64_t *down_offsets,
-    size_t layers,
-    uint32_t ggml_type,
-    const float *hidden_in,
-    const float *attn_norm_weights,
-    const float *ffn_norm_weights,
-    const float *q_biases,
-    const float *k_biases,
-    const float *v_biases,
-    const float *rope_cos,
-    const float *rope_sin,
-    float *key_cache,
-    float *value_cache,
-    size_t batch,
-    size_t context_tokens,
-    size_t hidden,
-    size_t kv,
-    size_t heads,
-    size_t kv_heads,
-    size_t head_dim,
-    size_t ffn,
-    float epsilon,
-    float *out
-) {
-    (void)mapping;
-    (void)mapping_len;
-    (void)q_offsets;
-    (void)k_offsets;
-    (void)v_offsets;
-    (void)output_offsets;
-    (void)gate_offsets;
-    (void)up_offsets;
-    (void)down_offsets;
-    (void)layers;
-    (void)ggml_type;
-    (void)hidden_in;
-    (void)attn_norm_weights;
-    (void)ffn_norm_weights;
-    (void)q_biases;
-    (void)k_biases;
-    (void)v_biases;
-    (void)rope_cos;
-    (void)rope_sin;
-    (void)key_cache;
-    (void)value_cache;
-    (void)batch;
-    (void)context_tokens;
-    (void)hidden;
-    (void)kv;
-    (void)heads;
-    (void)kv_heads;
-    (void)head_dim;
-    (void)ffn;
-    (void)epsilon;
-    (void)out;
-    return TE_STATUS_UNSUPPORTED;
-}
-
-#endif

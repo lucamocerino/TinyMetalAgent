@@ -952,6 +952,7 @@ te_status te_metal_decode_all_layers_f32(
         return TE_STATUS_UNSUPPORTED;
     }
     const size_t cache_tokens = position + 1u;
+    const bool residentKvRequested = te_metal_resident_kv_requested(position);
     if (cache_tokens > 8192u ||
         hidden > SIZE_MAX / sizeof(float) || kv > SIZE_MAX / sizeof(float) ||
         ffn > SIZE_MAX / sizeof(float) ||
@@ -959,7 +960,11 @@ te_status te_metal_decode_all_layers_f32(
         layers > SIZE_MAX / kv || layers * kv > SIZE_MAX / sizeof(float) ||
         cache_tokens > SIZE_MAX / kv || cache_tokens * kv > SIZE_MAX / sizeof(float) ||
         layers > SIZE_MAX / cache_tokens || layers * cache_tokens > SIZE_MAX / kv ||
-        layers * cache_tokens * kv > SIZE_MAX / sizeof(float)) {
+        layers * cache_tokens * kv > SIZE_MAX / sizeof(float) ||
+        (residentKvRequested &&
+         (context_tokens > SIZE_MAX / kv || context_tokens * kv > SIZE_MAX / sizeof(float) ||
+          layers > SIZE_MAX / context_tokens || layers * context_tokens > SIZE_MAX / kv ||
+          layers * context_tokens * kv > SIZE_MAX / sizeof(float)))) {
         return TE_STATUS_UNSUPPORTED;
     }
     for (size_t layer = 0; layer < layers; ++layer) {
@@ -1009,10 +1014,13 @@ te_status te_metal_decode_all_layers_f32(
         const size_t block_index_bytes = argmax_blocks * sizeof(uint32_t);
         const size_t rope_bytes = (head_dim / 2u) * sizeof(float);
         const size_t cache_bytes = cache_tokens * kv_bytes;
+        const size_t cache_stride_tokens = residentKvRequested ? context_tokens : cache_tokens;
+        const size_t cache_stride_values = cache_stride_tokens * kv;
+        const size_t cache_stride_bytes = cache_stride_values * sizeof(float);
         const size_t all_weight_bytes = layers * hidden_bytes;
         const size_t all_weight_plus_output_bytes = project_argmax ? all_weight_bytes + hidden_bytes : all_weight_bytes;
         const size_t all_kv_bias_bytes = layers * kv_bytes;
-        const size_t all_cache_bytes = layers * cache_bytes;
+        const size_t all_cache_bytes = layers * cache_stride_bytes;
         size_t max_output_bytes = hidden_bytes > ffn_bytes ? hidden_bytes : ffn_bytes;
         size_t max_scratch_bytes = ffn_bytes > kv_bytes ? ffn_bytes : kv_bytes;
         size_t max_output2_bytes = max_output_bytes > kv_bytes ? max_output_bytes : kv_bytes;
@@ -1109,11 +1117,13 @@ te_status te_metal_decode_all_layers_f32(
             runtime.keyCacheBuffer = [runtime.device newBufferWithLength:all_cache_bytes
                                                                  options:MTLResourceStorageModeShared];
             runtime.keyCacheCapacity = all_cache_bytes;
+            runtime.residentKvCacheValid = NO;
         }
         if (runtime.valueCacheBuffer == nil || runtime.valueCacheCapacity < all_cache_bytes) {
             runtime.valueCacheBuffer = [runtime.device newBufferWithLength:all_cache_bytes
                                                                   options:MTLResourceStorageModeShared];
             runtime.valueCacheCapacity = all_cache_bytes;
+            runtime.residentKvCacheValid = NO;
         }
         if (project_argmax && runtime.scalarBuffer == nil) {
             runtime.scalarBuffer = [runtime.device newBufferWithLength:sizeof(uint32_t)
@@ -1142,15 +1152,24 @@ te_status te_metal_decode_all_layers_f32(
         memcpy([runtime.ropeSinBuffer contents], rope_sin, rope_bytes);
         float *key_contents = (float *)[runtime.keyCacheBuffer contents];
         float *value_contents = (float *)[runtime.valueCacheBuffer contents];
-        for (size_t layer = 0; layer < layers; ++layer) {
-            memcpy(
-                key_contents + layer * cache_tokens * kv,
-                key_cache + layer * context_tokens * kv,
-                cache_bytes);
-            memcpy(
-                value_contents + layer * cache_tokens * kv,
-                value_cache + layer * context_tokens * kv,
-                cache_bytes);
+        const bool useResidentKvCache = residentKvRequested &&
+            runtime.residentKvCacheValid &&
+            runtime.residentKvMappingPtr == mapping &&
+            runtime.residentKvLayers == layers &&
+            runtime.residentKvContextTokens == context_tokens &&
+            runtime.residentKvKv == kv &&
+            runtime.residentKvFilledTokens >= position;
+        if (!useResidentKvCache) {
+            for (size_t layer = 0; layer < layers; ++layer) {
+                memcpy(
+                    key_contents + layer * cache_stride_values,
+                    key_cache + layer * context_tokens * kv,
+                    cache_bytes);
+                memcpy(
+                    value_contents + layer * cache_stride_values,
+                    value_cache + layer * context_tokens * kv,
+                    cache_bytes);
+            }
         }
         const uint32_t hidden_len = (uint32_t)hidden;
         const uint32_t ffn_len = (uint32_t)ffn;
@@ -1219,7 +1238,7 @@ te_status te_metal_decode_all_layers_f32(
             const NSUInteger normOffset = (NSUInteger)(layer * hidden_bytes);
             const NSUInteger qBiasOffset = (NSUInteger)(layer * hidden_bytes);
             const NSUInteger kvBiasOffset = (NSUInteger)(layer * kv_bytes);
-            const NSUInteger cacheOffset = (NSUInteger)(layer * cache_bytes);
+            const NSUInteger cacheOffset = (NSUInteger)(layer * cache_stride_bytes);
 
             [encoder setComputePipelineState:runtime.vectorCopyPipeline];
             [encoder setBuffer:hiddenIn offset:0 atIndex:0];
@@ -1411,12 +1430,20 @@ te_status te_metal_decode_all_layers_f32(
         for (size_t layer = 0; layer < layers; ++layer) {
             memcpy(
                 key_cache + (layer * context_tokens + position) * kv,
-                key_contents + (layer * cache_tokens + position) * kv,
+                key_contents + layer * cache_stride_values + position * kv,
                 kv_bytes);
             memcpy(
                 value_cache + (layer * context_tokens + position) * kv,
-                value_contents + (layer * cache_tokens + position) * kv,
+                value_contents + layer * cache_stride_values + position * kv,
                 kv_bytes);
+        }
+        if (residentKvRequested) {
+            runtime.residentKvCacheValid = YES;
+            runtime.residentKvMappingPtr = mapping;
+            runtime.residentKvLayers = layers;
+            runtime.residentKvContextTokens = context_tokens;
+            runtime.residentKvKv = kv;
+            runtime.residentKvFilledTokens = position + 1u;
         }
         return TE_STATUS_OK;
     }
@@ -1953,6 +1980,10 @@ te_status te_metal_prefill_all_layers_f32(
         layers > SIZE_MAX / kv || layers * kv > SIZE_MAX / sizeof(float) ||
         layers > SIZE_MAX / batch || layers * batch > SIZE_MAX / kv ||
         layers * batch * kv > SIZE_MAX / sizeof(float) ||
+        (te_metal_resident_kv_requested(batch) &&
+         (context_tokens > SIZE_MAX / kv || context_tokens * kv > SIZE_MAX / sizeof(float) ||
+          layers > SIZE_MAX / context_tokens || layers * context_tokens > SIZE_MAX / kv ||
+          layers * context_tokens * kv > SIZE_MAX / sizeof(float))) ||
         batch > SIZE_MAX / (head_dim / 2u) ||
         batch * (head_dim / 2u) > SIZE_MAX / sizeof(float)) {
         return TE_STATUS_UNSUPPORTED;
@@ -1995,11 +2026,15 @@ te_status te_metal_prefill_all_layers_f32(
         const size_t rope_values = batch * (head_dim / 2u);
         const size_t layer_hidden_values = layers * hidden;
         const size_t layer_kv_values = layers * kv;
-        const size_t all_cache_values = layers * batch * kv;
+        const bool residentKvRequested = te_metal_resident_kv_requested(batch);
+        const size_t cache_stride_tokens = residentKvRequested ? context_tokens : batch;
+        const size_t cache_stride_values = cache_stride_tokens * kv;
+        const size_t all_cache_values = layers * cache_stride_values;
         const size_t hidden_bytes = hidden_values * sizeof(float);
         const size_t kv_bytes = kv_values * sizeof(float);
         const size_t ffn_bytes = ffn_values * sizeof(float);
         const size_t rope_bytes = rope_values * sizeof(float);
+        const size_t cache_stride_bytes = cache_stride_values * sizeof(float);
         const size_t weight_bytes = hidden * sizeof(float);
         const size_t q_bias_bytes = hidden * sizeof(float);
         const size_t kv_bias_bytes = kv * sizeof(float);
@@ -2007,6 +2042,9 @@ te_status te_metal_prefill_all_layers_f32(
         const size_t all_kv_bias_bytes = layer_kv_values * sizeof(float);
         const size_t all_cache_bytes = all_cache_values * sizeof(float);
         const size_t all_cache_half_bytes = all_cache_values * sizeof(uint16_t);
+        const size_t transpose_cache_tokens = ((batch + 15u) / 16u) * 16u;
+        const size_t transpose_cache_bytes = transpose_cache_tokens * kv * sizeof(float);
+        const size_t all_cache_transpose_bytes = layers * transpose_cache_bytes;
         const size_t max_output_bytes = hidden_bytes > ffn_bytes ? hidden_bytes : ffn_bytes;
         const size_t max_output2_bytes = max_output_bytes > kv_bytes ? max_output_bytes : kv_bytes;
         const size_t max_scratch_bytes = ffn_bytes > kv_bytes ? ffn_bytes : kv_bytes;
@@ -2095,14 +2133,20 @@ te_status te_metal_prefill_all_layers_f32(
             runtime.keyCacheBuffer = [runtime.device newBufferWithLength:all_cache_bytes
                                                                  options:MTLResourceStorageModeShared];
             runtime.keyCacheCapacity = all_cache_bytes;
+            runtime.residentKvCacheValid = NO;
         }
         if (runtime.valueCacheBuffer == nil || runtime.valueCacheCapacity < all_cache_bytes) {
             runtime.valueCacheBuffer = [runtime.device newBufferWithLength:all_cache_bytes
                                                                    options:MTLResourceStorageModeShared];
             runtime.valueCacheCapacity = all_cache_bytes;
+            runtime.residentKvCacheValid = NO;
         }
         const bool canUseFlashHalfKv = runtime.qkvBiasRopeCacheBatchHalfPipeline != nil &&
             runtime.attentionFlashHalfPipeline != nil && te_metal_flash_attention_half_kv_requested();
+        const bool canUseTransposedKv = te_metal_transposed_prefill_kv_requested(batch) &&
+            runtime.qkvBiasRopeCacheBatchTransposePipeline != nil &&
+            runtime.attentionFlashLongTransposePipeline != nil &&
+            head_dim == 64u;
         if (canUseFlashHalfKv &&
             (runtime.keyCacheHalfBuffer == nil || runtime.keyCacheHalfCapacity < all_cache_half_bytes)) {
             runtime.keyCacheHalfBuffer = [runtime.device newBufferWithLength:all_cache_half_bytes
@@ -2115,13 +2159,26 @@ te_status te_metal_prefill_all_layers_f32(
                                                                        options:MTLResourceStorageModeShared];
             runtime.valueCacheHalfCapacity = all_cache_half_bytes;
         }
+        if (canUseTransposedKv &&
+            (runtime.keyCacheTransposeBuffer == nil || runtime.keyCacheTransposeCapacity < all_cache_transpose_bytes)) {
+            runtime.keyCacheTransposeBuffer = [runtime.device newBufferWithLength:all_cache_transpose_bytes
+                                                                          options:MTLResourceStorageModeShared];
+            runtime.keyCacheTransposeCapacity = all_cache_transpose_bytes;
+        }
+        if (canUseTransposedKv &&
+            (runtime.valueCacheTransposeBuffer == nil || runtime.valueCacheTransposeCapacity < all_cache_transpose_bytes)) {
+            runtime.valueCacheTransposeBuffer = [runtime.device newBufferWithLength:all_cache_transpose_bytes
+                                                                            options:MTLResourceStorageModeShared];
+            runtime.valueCacheTransposeCapacity = all_cache_transpose_bytes;
+        }
         if (runtime.inputBuffer == nil || runtime.output3Buffer == nil || runtime.normBuffer == nil ||
             runtime.outputBuffer == nil || runtime.output2Buffer == nil || runtime.scratchBuffer == nil ||
             runtime.weightBuffer == nil || runtime.weight2Buffer == nil ||
             runtime.biasBuffer == nil || runtime.bias2Buffer == nil || runtime.bias3Buffer == nil ||
             runtime.ropeCosBuffer == nil || runtime.ropeSinBuffer == nil ||
             runtime.keyCacheBuffer == nil || runtime.valueCacheBuffer == nil ||
-            (canUseFlashHalfKv && (runtime.keyCacheHalfBuffer == nil || runtime.valueCacheHalfBuffer == nil))) {
+            (canUseFlashHalfKv && (runtime.keyCacheHalfBuffer == nil || runtime.valueCacheHalfBuffer == nil)) ||
+            (canUseTransposedKv && (runtime.keyCacheTransposeBuffer == nil || runtime.valueCacheTransposeBuffer == nil))) {
             return TE_STATUS_OUT_OF_MEMORY;
         }
 
@@ -2145,7 +2202,7 @@ te_status te_metal_prefill_all_layers_f32(
         const uint32_t q_pairs = (uint32_t)(heads * (head_dim / 2u));
         const uint32_t k_pairs = (uint32_t)(kv_heads * (head_dim / 2u));
         const uint32_t max_bias_items = std::max(std::max(q_pairs, k_pairs), (uint32_t)kv);
-        const uint32_t bias_dims[8] = {
+        const uint32_t bias_dims[9] = {
             (uint32_t)batch,
             0u,
             (uint32_t)hidden,
@@ -2153,14 +2210,16 @@ te_status te_metal_prefill_all_layers_f32(
             (uint32_t)heads,
             (uint32_t)kv_heads,
             (uint32_t)head_dim,
-            max_bias_items};
-        const uint32_t attention_dims[6] = {
+            max_bias_items,
+            (uint32_t)transpose_cache_tokens};
+        const uint32_t attention_dims[7] = {
             (uint32_t)batch,
             0u,
             (uint32_t)heads,
             (uint32_t)kv_heads,
             (uint32_t)head_dim,
-            (uint32_t)batch};
+            (uint32_t)batch,
+            (uint32_t)transpose_cache_tokens};
 
         id<MTLCommandBuffer> commandBuffer = [runtime.queue commandBuffer];
         if (commandBuffer == nil) {
@@ -2188,6 +2247,10 @@ te_status te_metal_prefill_all_layers_f32(
         const bool useFlashGqa = useFlashAttention && te_metal_use_flash_attention_gqa(runtime, batch, heads, kv_heads, head_dim);
         const bool useFlashLongTile = useFlashAttention && !useFlashGqa &&
             te_metal_use_flash_attention_long_tile(runtime, batch, heads, kv_heads, head_dim);
+        const bool useFlashTransposedKv = useFlashLongTile && canUseTransposedKv;
+        const bool useFlashMma = useFlashTransposedKv &&
+            te_metal_mma_prefill_attention_requested(batch) &&
+            runtime.attentionFlashMmaTransposePipeline != nil;
         const bool useFlashHalfKv = useFlashAttention && !useFlashGqa && !useFlashLongTile && canUseFlashHalfKv;
         const NSUInteger qRowTile = useQMatmul ? TE_METAL_Q4_MATMUL_ROW_TILE : (useQLlama ? TE_METAL_Q4_BATCH_LLAMA_ROW_TILE : TE_METAL_Q4_BATCH_ROW_TILE);
         const NSUInteger qBatchTile = useQMatmul ? TE_METAL_Q4_MATMUL_BATCH_TILE : (useQLlama ? TE_METAL_Q4_BATCH_LLAMA_TILE : TE_METAL_Q4_BATCH_TILE);
@@ -2226,7 +2289,9 @@ te_status te_metal_prefill_all_layers_f32(
             : MTLSizeMake((hidden + downRowTile - 1u) / downRowTile, (batch + downBatchTile - 1u) / downBatchTile, 1);
         const MTLSize ffnVectorGroups = MTLSizeMake((ffn_values + TE_METAL_VECTOR_THREADS - 1u) / TE_METAL_VECTOR_THREADS, 1, 1);
         const MTLSize biasGroups = MTLSizeMake(((NSUInteger)batch * max_bias_items + TE_METAL_VECTOR_THREADS - 1u) / TE_METAL_VECTOR_THREADS, 1, 1);
-        const MTLSize attentionGroups = useFlashGqa ? MTLSizeMake(batch, kv_heads, 1) : MTLSizeMake(batch, heads, 1);
+        const MTLSize attentionGroups = useFlashGqa
+            ? MTLSizeMake(batch, kv_heads, 1)
+            : (useFlashMma ? MTLSizeMake((batch + 7u) / 8u, heads, 1) : MTLSizeMake(batch, heads, 1));
         const bool stageProfile = te_metal_prefill_stage_profile_enabled();
         auto finishPrefillStage = [&](const char *stage, size_t layer, bool reopen) -> te_status {
             if (!stageProfile) {
@@ -2280,8 +2345,9 @@ te_status te_metal_prefill_all_layers_f32(
             const NSUInteger normOffset = (NSUInteger)(layer * weight_bytes);
             const NSUInteger qBiasOffset = (NSUInteger)(layer * q_bias_bytes);
             const NSUInteger kvBiasOffset = (NSUInteger)(layer * kv_bias_bytes);
-            const NSUInteger cacheOffset = (NSUInteger)(layer * kv_bytes);
-            const NSUInteger halfCacheOffset = (NSUInteger)(layer * batch * kv * sizeof(uint16_t));
+            const NSUInteger cacheOffset = (NSUInteger)(layer * cache_stride_bytes);
+            const NSUInteger halfCacheOffset = (NSUInteger)(layer * cache_stride_values * sizeof(uint16_t));
+            const NSUInteger transposeCacheOffset = (NSUInteger)(layer * transpose_cache_bytes);
 
             [encoder setComputePipelineState:runtime.vectorCopyPipeline];
             [encoder setBuffer:hiddenIn offset:0 atIndex:0];
@@ -2337,7 +2403,9 @@ te_status te_metal_prefill_all_layers_f32(
                 TE_PREFILL_STAGE_PROFILE("kv_proj", true);
             }
 
-            [encoder setComputePipelineState:useFlashHalfKv ? runtime.qkvBiasRopeCacheBatchHalfPipeline : runtime.qkvBiasRopeCacheBatchPipeline];
+            [encoder setComputePipelineState:useFlashTransposedKv
+                ? runtime.qkvBiasRopeCacheBatchTransposePipeline
+                : (useFlashHalfKv ? runtime.qkvBiasRopeCacheBatchHalfPipeline : runtime.qkvBiasRopeCacheBatchPipeline)];
             [encoder setBuffer:runtime.outputBuffer offset:0 atIndex:0];
             [encoder setBuffer:runtime.output2Buffer offset:0 atIndex:1];
             [encoder setBuffer:runtime.scratchBuffer offset:0 atIndex:2];
@@ -2348,7 +2416,11 @@ te_status te_metal_prefill_all_layers_f32(
             [encoder setBuffer:runtime.ropeSinBuffer offset:0 atIndex:7];
             [encoder setBuffer:runtime.keyCacheBuffer offset:cacheOffset atIndex:8];
             [encoder setBuffer:runtime.valueCacheBuffer offset:cacheOffset atIndex:9];
-            if (useFlashHalfKv) {
+            if (useFlashTransposedKv) {
+                [encoder setBuffer:runtime.keyCacheTransposeBuffer offset:transposeCacheOffset atIndex:10];
+                [encoder setBuffer:runtime.valueCacheTransposeBuffer offset:transposeCacheOffset atIndex:11];
+                [encoder setBytes:bias_dims length:sizeof(bias_dims) atIndex:12];
+            } else if (useFlashHalfKv) {
                 [encoder setBuffer:runtime.keyCacheHalfBuffer offset:halfCacheOffset atIndex:10];
                 [encoder setBuffer:runtime.valueCacheHalfBuffer offset:halfCacheOffset atIndex:11];
                 [encoder setBytes:bias_dims length:sizeof(bias_dims) atIndex:12];
@@ -2358,10 +2430,20 @@ te_status te_metal_prefill_all_layers_f32(
             [encoder dispatchThreadgroups:biasGroups threadsPerThreadgroup:vectorThreads];
             TE_PREFILL_STAGE_PROFILE("qkv_bias_rope", true);
 
-            [encoder setComputePipelineState:useFlashGqa ? runtime.attentionFlashGqaPipeline : (useFlashLongTile ? runtime.attentionFlashLongPipeline : (useFlashHalfKv ? runtime.attentionFlashHalfPipeline : (useFlashAttention ? runtime.attentionFlashPipeline : runtime.attentionDecodePipeline)))];
-            id<MTLBuffer> attentionKeyCache = useFlashHalfKv ? runtime.keyCacheHalfBuffer : runtime.keyCacheBuffer;
-            id<MTLBuffer> attentionValueCache = useFlashHalfKv ? runtime.valueCacheHalfBuffer : runtime.valueCacheBuffer;
-            const NSUInteger attentionCacheOffset = useFlashHalfKv ? halfCacheOffset : cacheOffset;
+            [encoder setComputePipelineState:useFlashGqa
+                ? runtime.attentionFlashGqaPipeline
+                : (useFlashTransposedKv
+                    ? (useFlashMma ? runtime.attentionFlashMmaTransposePipeline : runtime.attentionFlashLongTransposePipeline)
+                    : (useFlashLongTile ? runtime.attentionFlashLongPipeline : (useFlashHalfKv ? runtime.attentionFlashHalfPipeline : (useFlashAttention ? runtime.attentionFlashPipeline : runtime.attentionDecodePipeline))))];
+            id<MTLBuffer> attentionKeyCache = useFlashTransposedKv
+                ? runtime.keyCacheTransposeBuffer
+                : (useFlashHalfKv ? runtime.keyCacheHalfBuffer : runtime.keyCacheBuffer);
+            id<MTLBuffer> attentionValueCache = useFlashTransposedKv
+                ? runtime.valueCacheTransposeBuffer
+                : (useFlashHalfKv ? runtime.valueCacheHalfBuffer : runtime.valueCacheBuffer);
+            const NSUInteger attentionCacheOffset = useFlashTransposedKv
+                ? transposeCacheOffset
+                : (useFlashHalfKv ? halfCacheOffset : cacheOffset);
             [encoder setBuffer:runtime.outputBuffer offset:0 atIndex:0];
             [encoder setBuffer:attentionKeyCache offset:attentionCacheOffset atIndex:1];
             [encoder setBuffer:attentionValueCache offset:attentionCacheOffset atIndex:2];
@@ -2371,7 +2453,7 @@ te_status te_metal_prefill_all_layers_f32(
                 [encoder setThreadgroupMemoryLength:batch * sizeof(float) atIndex:0];
             }
             [encoder dispatchThreadgroups:attentionGroups threadsPerThreadgroup:attentionThreads];
-            TE_PREFILL_STAGE_PROFILE(useFlashGqa ? "flash_attention_gqa" : (useFlashLongTile ? "flash_attention_t128" : (useFlashHalfKv ? "flash_attention_hkv" : (useFlashAttention ? "flash_attention" : "attention"))), true);
+            TE_PREFILL_STAGE_PROFILE(useFlashGqa ? "flash_attention_gqa" : (useFlashMma ? "flash_attention_mma_tkv" : (useFlashTransposedKv ? "flash_attention_t128_tkv" : (useFlashLongTile ? "flash_attention_t128" : (useFlashHalfKv ? "flash_attention_hkv" : (useFlashAttention ? "flash_attention" : "attention"))))), true);
 
             [encoder setComputePipelineState:useOutputMatmul ? runtime.q4MatmulPipeline : (useOutputLlama ? runtime.q4BatchLlamaPipeline : runtime.q4BatchPipeline)];
             [encoder setBuffer:runtime.output2Buffer offset:0 atIndex:0];
@@ -2508,13 +2590,157 @@ te_status te_metal_prefill_all_layers_f32(
         for (size_t layer = 0; layer < layers; ++layer) {
             memcpy(
                 key_cache + layer * context_tokens * kv,
-                key_contents + layer * batch * kv,
+                key_contents + layer * cache_stride_values,
                 kv_bytes);
             memcpy(
                 value_cache + layer * context_tokens * kv,
-                value_contents + layer * batch * kv,
+                value_contents + layer * cache_stride_values,
                 kv_bytes);
         }
+        if (residentKvRequested) {
+            runtime.residentKvCacheValid = YES;
+            runtime.residentKvMappingPtr = mapping;
+            runtime.residentKvLayers = layers;
+            runtime.residentKvContextTokens = context_tokens;
+            runtime.residentKvKv = kv;
+            runtime.residentKvFilledTokens = batch;
+        } else {
+            runtime.residentKvCacheValid = NO;
+        }
+        return TE_STATUS_OK;
+    }
+}
+
+te_status te_metal_warm_model(const void *mapping, size_t mapping_len) {
+    if (mapping == NULL || mapping_len == 0) {
+        return TE_STATUS_INVALID_ARGUMENT;
+    }
+    const char *warmup = getenv("TINYENGINE_METAL_WARMUP");
+    if (warmup != NULL && strcmp(warmup, "0") == 0) {
+        return TE_STATUS_UNSUPPORTED;
+    }
+    if (!te_metal_enabled()) {
+        return TE_STATUS_UNSUPPORTED;
+    }
+    // The touch kernel addresses the mapping with 32-bit offsets, and Metal
+    // buffers cannot exceed maxBufferLength anyway, so bail on huge mappings.
+    if (mapping_len > (size_t)0xFFFFFFFFu) {
+        return TE_STATUS_UNSUPPORTED;
+    }
+
+    @autoreleasepool {
+        std::lock_guard<std::mutex> lock(TE_METAL_MUTEX);
+        te_status status = te_metal_init_locked();
+        if (status != TE_STATUS_OK) {
+            return status;
+        }
+        TEMetalRuntime *runtime = TE_METAL_RUNTIME;
+        if (runtime.touchPipeline == nil) {
+            return TE_STATUS_UNSUPPORTED;
+        }
+        if (runtime.mappingBuffer == nil || runtime.mappingPtr != mapping || runtime.mappingLen != mapping_len) {
+            runtime.mappingBuffer = [runtime.device newBufferWithBytesNoCopy:(void *)mapping
+                                                                      length:mapping_len
+                                                                     options:MTLResourceStorageModeShared
+                                                                 deallocator:nil];
+            runtime.mappingPtr = mapping;
+            runtime.mappingLen = mapping_len;
+            runtime.warmedMappingPtr = NULL;
+            runtime.warmedMappingLen = 0;
+            if (runtime.mappingBuffer == nil) {
+                return TE_STATUS_UNSUPPORTED;
+            }
+        }
+        if (runtime.warmedMappingPtr == mapping && runtime.warmedMappingLen == mapping_len) {
+            return TE_STATUS_OK;
+        }
+
+        // Keep the model buffer resident across every future command buffer so
+        // the driver does not re-validate residency on each prefill/decode.
+        if (@available(macOS 15.0, *)) {
+            if (runtime.modelResidencySet == nil) {
+                MTLResidencySetDescriptor *desc = [[MTLResidencySetDescriptor alloc] init];
+                NSError *resError = nil;
+                id<MTLResidencySet> set = [runtime.device newResidencySetWithDescriptor:desc error:&resError];
+                if (set != nil) {
+                    [set addAllocation:runtime.mappingBuffer];
+                    [set commit];
+                    [set requestResidency];
+                    [runtime.queue addResidencySet:set];
+                    runtime.modelResidencySet = set;
+                }
+            }
+        }
+
+        // Fault every page of the model into the GPU working set up front so the
+        // first real matmul does not absorb the page-in/first-use stall.
+        const NSUInteger stride = (NSUInteger)sysconf(_SC_PAGESIZE);
+        if (stride == 0) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        const NSUInteger pages = (mapping_len + stride - 1u) / stride;
+        const NSUInteger outBytes = pages * sizeof(uint32_t);
+        id<MTLBuffer> touchOut = [runtime.device newBufferWithLength:outBytes
+                                                            options:MTLResourceStorageModeShared];
+        if (touchOut == nil) {
+            return TE_STATUS_OUT_OF_MEMORY;
+        }
+        const uint32_t strideU = (uint32_t)stride;
+        const uint32_t lenU = (uint32_t)mapping_len;
+        id<MTLCommandBuffer> commandBuffer = [runtime.queue commandBuffer];
+        if (commandBuffer == nil) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+        if (encoder == nil) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        [encoder setComputePipelineState:runtime.touchPipeline];
+        [encoder setBuffer:runtime.mappingBuffer offset:0 atIndex:0];
+        [encoder setBuffer:touchOut offset:0 atIndex:1];
+        [encoder setBytes:&strideU length:sizeof(strideU) atIndex:2];
+        [encoder setBytes:&lenU length:sizeof(lenU) atIndex:3];
+        NSUInteger tptg = runtime.touchPipeline.maxTotalThreadsPerThreadgroup;
+        if (tptg > 256u) {
+            tptg = 256u;
+        }
+        const NSUInteger groups = (pages + tptg - 1u) / tptg;
+        [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(tptg, 1, 1)];
+        [encoder endEncoding];
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+        if (commandBuffer.status != MTLCommandBufferStatusCompleted) {
+            return TE_STATUS_RUNTIME_ERROR;
+        }
+        runtime.warmedMappingPtr = mapping;
+        runtime.warmedMappingLen = mapping_len;
+        return TE_STATUS_OK;
+    }
+}
+
+te_status te_metal_release_model(const void *mapping, size_t mapping_len) {
+    @autoreleasepool {
+        std::lock_guard<std::mutex> lock(TE_METAL_MUTEX);
+        if (TE_METAL_RUNTIME == nil) {
+            return TE_STATUS_OK;
+        }
+        TEMetalRuntime *runtime = TE_METAL_RUNTIME;
+        if (runtime.mappingPtr != mapping || runtime.mappingLen != mapping_len) {
+            return TE_STATUS_OK;
+        }
+        if (@available(macOS 15.0, *)) {
+            if (runtime.modelResidencySet != nil) {
+                id<MTLResidencySet> set = (id<MTLResidencySet>)runtime.modelResidencySet;
+                [runtime.queue removeResidencySet:set];
+                runtime.modelResidencySet = nil;
+            }
+        }
+        runtime.mappingBuffer = nil;
+        runtime.mappingPtr = NULL;
+        runtime.mappingLen = 0;
+        runtime.warmedMappingPtr = NULL;
+        runtime.warmedMappingLen = 0;
         return TE_STATUS_OK;
     }
 }

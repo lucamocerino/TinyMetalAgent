@@ -82,6 +82,13 @@ te_status te_qwen_generate_reference(
     te_token_callback callback,
     void *userdata
 );
+te_status te_qwen_generate_raw(
+    te_context *context,
+    const char *prompt,
+    uint32_t max_tokens,
+    te_token_callback callback,
+    void *userdata
+);
 const te_gguf_tensor *te_model_find_tensor(const te_model *model, const char *name);
 te_status te_model_tensor_data(
     const te_model *model,

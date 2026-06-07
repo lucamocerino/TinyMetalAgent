@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# tinyagent launcher: runs the local-model coding agent CLI.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${here}/../python:${PYTHONPATH}"
+exec python3 -m tinyagent "$@"

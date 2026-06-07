@@ -519,6 +519,227 @@ static void test_metal_qkv_batch_q4(void) {
     free(mapping);
 }
 
+static void test_metal_attention_qk_mma(void) {
+    enum { q_rows = 8, k_cols = 8, head_dim = 64 };
+    float query[q_rows * head_dim];
+    float key_t[head_dim * k_cols];
+    float actual[q_rows * k_cols];
+    float expected[q_rows * k_cols];
+    for (size_t q = 0; q < q_rows; ++q) {
+        for (size_t dim = 0; dim < head_dim; ++dim) {
+            query[q * head_dim + dim] = ((float)((q + 1u) * ((dim % 7u) + 1u))) * 0.0078125f;
+        }
+    }
+    for (size_t dim = 0; dim < head_dim; ++dim) {
+        for (size_t k = 0; k < k_cols; ++k) {
+            key_t[dim * k_cols + k] = ((float)(((dim % 5u) + 1u) * (k + 2u))) * 0.015625f;
+        }
+    }
+    for (size_t q = 0; q < q_rows; ++q) {
+        for (size_t k = 0; k < k_cols; ++k) {
+            float sum = 0.0f;
+            for (size_t dim = 0; dim < head_dim; ++dim) {
+                sum += query[q * head_dim + dim] * key_t[dim * k_cols + k];
+            }
+            expected[q * k_cols + k] = sum;
+        }
+    }
+
+    const te_status status = te_metal_attention_qk_mma_f32(query, key_t, q_rows, k_cols, head_dim, actual);
+    if (status == TE_STATUS_UNSUPPORTED) {
+        return;
+    }
+    expect_status(status, "metal attention qk mma");
+    for (size_t index = 0; index < q_rows * k_cols; ++index) {
+        expect_close(actual[index], expected[index], 1e-4f, "metal attention qk mma score");
+    }
+}
+
+static void test_metal_attention_tile_mma(void) {
+    enum { q_rows = 8, k_cols = 8, head_dim = 64 };
+    float query[q_rows * head_dim];
+    float key_t[head_dim * k_cols];
+    float value[k_cols * head_dim];
+    float actual[q_rows * head_dim];
+    float expected[q_rows * head_dim];
+    float scores[q_rows * k_cols];
+    for (size_t q = 0; q < q_rows; ++q) {
+        for (size_t dim = 0; dim < head_dim; ++dim) {
+            query[q * head_dim + dim] = ((float)((q + 1u) * ((dim % 7u) + 1u))) * 0.0078125f;
+        }
+    }
+    for (size_t dim = 0; dim < head_dim; ++dim) {
+        for (size_t k = 0; k < k_cols; ++k) {
+            key_t[dim * k_cols + k] = ((float)(((dim % 5u) + 1u) * (k + 2u))) * 0.015625f;
+        }
+    }
+    for (size_t k = 0; k < k_cols; ++k) {
+        for (size_t dim = 0; dim < head_dim; ++dim) {
+            value[k * head_dim + dim] = ((float)((k + 3u) * ((dim % 11u) + 1u))) * 0.00390625f;
+        }
+    }
+    const float scale = 1.0f / sqrtf((float)head_dim);
+    for (size_t q = 0; q < q_rows; ++q) {
+        float row_max = -3.402823466e+38f;
+        for (size_t k = 0; k < k_cols; ++k) {
+            float sum = 0.0f;
+            for (size_t dim = 0; dim < head_dim; ++dim) {
+                sum += query[q * head_dim + dim] * key_t[dim * k_cols + k];
+            }
+            scores[q * k_cols + k] = sum * scale;
+            if (scores[q * k_cols + k] > row_max) {
+                row_max = scores[q * k_cols + k];
+            }
+        }
+        float row_sum = 0.0f;
+        for (size_t k = 0; k < k_cols; ++k) {
+            scores[q * k_cols + k] = expf(scores[q * k_cols + k] - row_max);
+            row_sum += scores[q * k_cols + k];
+        }
+        for (size_t dim = 0; dim < head_dim; ++dim) {
+            float out = 0.0f;
+            for (size_t k = 0; k < k_cols; ++k) {
+                out += (scores[q * k_cols + k] / row_sum) * value[k * head_dim + dim];
+            }
+            expected[q * head_dim + dim] = out;
+        }
+    }
+
+    const te_status status = te_metal_attention_tile_mma_f32(query, key_t, value, q_rows, k_cols, head_dim, actual);
+    if (status == TE_STATUS_UNSUPPORTED) {
+        return;
+    }
+    expect_status(status, "metal attention tile mma");
+    for (size_t index = 0; index < q_rows * head_dim; ++index) {
+        expect_close(actual[index], expected[index], 1e-4f, "metal attention tile mma out");
+    }
+}
+
+static void test_metal_attention_stream_mma(void) {
+    enum { q_rows = 8, k_cols = 24, head_dim = 64 };
+    float query[q_rows * head_dim];
+    float key_t[head_dim * k_cols];
+    float value[k_cols * head_dim];
+    float actual[q_rows * head_dim];
+    float expected[q_rows * head_dim];
+    float scores[q_rows * k_cols];
+    for (size_t q = 0; q < q_rows; ++q) {
+        for (size_t dim = 0; dim < head_dim; ++dim) {
+            query[q * head_dim + dim] = ((float)((q + 1u) * ((dim % 7u) + 1u))) * 0.0078125f;
+        }
+    }
+    for (size_t dim = 0; dim < head_dim; ++dim) {
+        for (size_t k = 0; k < k_cols; ++k) {
+            key_t[dim * k_cols + k] = ((float)(((dim % 5u) + 1u) * (k + 2u))) * 0.00390625f;
+        }
+    }
+    for (size_t k = 0; k < k_cols; ++k) {
+        for (size_t dim = 0; dim < head_dim; ++dim) {
+            value[k * head_dim + dim] = ((float)((k + 3u) * ((dim % 11u) + 1u))) * 0.001953125f;
+        }
+    }
+    const float scale = 1.0f / sqrtf((float)head_dim);
+    for (size_t q = 0; q < q_rows; ++q) {
+        float row_max = -3.402823466e+38f;
+        for (size_t k = 0; k < k_cols; ++k) {
+            float sum = 0.0f;
+            for (size_t dim = 0; dim < head_dim; ++dim) {
+                sum += query[q * head_dim + dim] * key_t[dim * k_cols + k];
+            }
+            scores[q * k_cols + k] = sum * scale;
+            if (scores[q * k_cols + k] > row_max) {
+                row_max = scores[q * k_cols + k];
+            }
+        }
+        float row_sum = 0.0f;
+        for (size_t k = 0; k < k_cols; ++k) {
+            scores[q * k_cols + k] = expf(scores[q * k_cols + k] - row_max);
+            row_sum += scores[q * k_cols + k];
+        }
+        for (size_t dim = 0; dim < head_dim; ++dim) {
+            float out = 0.0f;
+            for (size_t k = 0; k < k_cols; ++k) {
+                out += (scores[q * k_cols + k] / row_sum) * value[k * head_dim + dim];
+            }
+            expected[q * head_dim + dim] = out;
+        }
+    }
+
+    const te_status status = te_metal_attention_stream_mma_f32(query, key_t, value, q_rows, k_cols, head_dim, actual);
+    if (status == TE_STATUS_UNSUPPORTED) {
+        return;
+    }
+    expect_status(status, "metal attention stream mma");
+    for (size_t index = 0; index < q_rows * head_dim; ++index) {
+        expect_close(actual[index], expected[index], 1e-4f, "metal attention stream mma out");
+    }
+}
+
+static void test_metal_attention_causal_mma(void) {
+    enum { q_rows = 8, k_cols = 24, head_dim = 64, q_base = 8 };
+    float query[q_rows * head_dim];
+    float key_t[head_dim * k_cols];
+    float value[k_cols * head_dim];
+    float actual[q_rows * head_dim];
+    float expected[q_rows * head_dim];
+    float scores[q_rows * k_cols];
+    for (size_t q = 0; q < q_rows; ++q) {
+        for (size_t dim = 0; dim < head_dim; ++dim) {
+            query[q * head_dim + dim] = ((float)((q + 1u) * ((dim % 7u) + 1u))) * 0.0078125f;
+        }
+    }
+    for (size_t dim = 0; dim < head_dim; ++dim) {
+        for (size_t k = 0; k < k_cols; ++k) {
+            key_t[dim * k_cols + k] = ((float)(((dim % 5u) + 1u) * (k + 2u))) * 0.00390625f;
+        }
+    }
+    for (size_t k = 0; k < k_cols; ++k) {
+        for (size_t dim = 0; dim < head_dim; ++dim) {
+            value[k * head_dim + dim] = ((float)((k + 3u) * ((dim % 11u) + 1u))) * 0.001953125f;
+        }
+    }
+    const float scale = 1.0f / sqrtf((float)head_dim);
+    for (size_t q = 0; q < q_rows; ++q) {
+        const size_t max_k = q_base + q;
+        float row_max = -3.402823466e+38f;
+        for (size_t k = 0; k < k_cols; ++k) {
+            float sum = -3.402823466e+38f;
+            if (k <= max_k) {
+                sum = 0.0f;
+                for (size_t dim = 0; dim < head_dim; ++dim) {
+                    sum += query[q * head_dim + dim] * key_t[dim * k_cols + k];
+                }
+                sum *= scale;
+            }
+            scores[q * k_cols + k] = sum;
+            if (sum > row_max) {
+                row_max = sum;
+            }
+        }
+        float row_sum = 0.0f;
+        for (size_t k = 0; k < k_cols; ++k) {
+            scores[q * k_cols + k] = expf(scores[q * k_cols + k] - row_max);
+            row_sum += scores[q * k_cols + k];
+        }
+        for (size_t dim = 0; dim < head_dim; ++dim) {
+            float out = 0.0f;
+            for (size_t k = 0; k < k_cols; ++k) {
+                out += (scores[q * k_cols + k] / row_sum) * value[k * head_dim + dim];
+            }
+            expected[q * head_dim + dim] = out;
+        }
+    }
+
+    const te_status status = te_metal_attention_causal_mma_f32(query, key_t, value, q_rows, k_cols, head_dim, q_base, actual);
+    if (status == TE_STATUS_UNSUPPORTED) {
+        return;
+    }
+    expect_status(status, "metal attention causal mma");
+    for (size_t index = 0; index < q_rows * head_dim; ++index) {
+        expect_close(actual[index], expected[index], 1e-4f, "metal attention causal mma out");
+    }
+}
+
 int main(void) {
     const char *path = "build/kernel-test.gguf";
     write_fixture(path);
@@ -527,6 +748,10 @@ int main(void) {
     test_generated_metal_guard_tests();
     test_metal_qkv_pair_q4();
     test_metal_qkv_batch_q4();
+    test_metal_attention_qk_mma();
+    test_metal_attention_tile_mma();
+    test_metal_attention_stream_mma();
+    test_metal_attention_causal_mma();
     remove(path);
     puts("kernel-ops-ok");
     return 0;

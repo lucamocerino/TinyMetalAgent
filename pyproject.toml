@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tiny-metal-agent"
+version = "0.1.0"
+description = "Local Apple Silicon Metal inference engine and terminal coding agent for Qwen GGUF models"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+  { name = "TinyMetalAgent contributors" }
+]
+keywords = ["local-ai", "metal", "llm", "qwen", "gguf", "coding-agent"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Programming Language :: C",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development"
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/lucamocerino/tiny-metal-agent"
+Issues = "https://github.com/lucamocerino/tiny-metal-agent/issues"
+Security = "https://github.com/lucamocerino/tiny-metal-agent/security"
+
+[project.scripts]
+tinyagent = "tinyagent.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+
+[tool.setuptools.packages.find]
+where = ["python"]

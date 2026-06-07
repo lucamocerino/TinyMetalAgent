@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <time.h>
 #include <math.h>
@@ -38,6 +39,9 @@ typedef struct te_qwen_state {
     float *rope_sin;
     float *key_cache;
     float *value_cache;
+    float temperature;
+    uint32_t top_k;
+    uint64_t rng_state;
 } te_qwen_state;
 
 typedef struct te_qwen_profile {
@@ -254,12 +258,13 @@ static void te_qwen_profile_reset(void);
 static void te_qwen_profile_add_matvec(const char *name, double elapsed_ms);
 static void te_qwen_profile_print(void);
 
-te_status te_qwen_generate_reference(
+static te_status te_qwen_generate_text(
     te_context *context,
     const char *prompt,
     uint32_t max_tokens,
     te_token_callback callback,
-    void *userdata
+    void *userdata,
+    int apply_template
 ) {
     if (context == NULL || context->model == NULL || prompt == NULL) {
         return TE_STATUS_INVALID_ARGUMENT;
@@ -270,18 +275,34 @@ te_status te_qwen_generate_reference(
     te_model *model = context->model;
     size_t chat_len = 0;
     const double tokenize_start = te_qwen_now_ms();
-    te_status status = te_format_qwen_chat_prompt(prompt, NULL, 0u, &chat_len);
-    if (status != TE_STATUS_INVALID_ARGUMENT || chat_len == 0u) {
-        return status == TE_STATUS_OK ? TE_STATUS_RUNTIME_ERROR : status;
-    }
-    char *chat = (char *)malloc(chat_len + 1u);
-    if (chat == NULL) {
-        return TE_STATUS_OUT_OF_MEMORY;
-    }
-    status = te_format_qwen_chat_prompt(prompt, chat, chat_len + 1u, &chat_len);
-    if (status != TE_STATUS_OK) {
-        free(chat);
-        return status;
+    te_status status = TE_STATUS_OK;
+    char *chat = NULL;
+    if (apply_template) {
+        status = te_format_qwen_chat_prompt(prompt, NULL, 0u, &chat_len);
+        if (status != TE_STATUS_INVALID_ARGUMENT || chat_len == 0u) {
+            return status == TE_STATUS_OK ? TE_STATUS_RUNTIME_ERROR : status;
+        }
+        chat = (char *)malloc(chat_len + 1u);
+        if (chat == NULL) {
+            return TE_STATUS_OUT_OF_MEMORY;
+        }
+        status = te_format_qwen_chat_prompt(prompt, chat, chat_len + 1u, &chat_len);
+        if (status != TE_STATUS_OK) {
+            free(chat);
+            return status;
+        }
+    } else {
+        /* Raw mode: tokenize the caller-supplied prompt verbatim (special tokens
+         * such as <|im_start|>/<|im_end|> are parsed) without any chat template. */
+        chat_len = strlen(prompt);
+        if (chat_len == 0u) {
+            return TE_STATUS_INVALID_ARGUMENT;
+        }
+        chat = (char *)malloc(chat_len + 1u);
+        if (chat == NULL) {
+            return TE_STATUS_OUT_OF_MEMORY;
+        }
+        memcpy(chat, prompt, chat_len + 1u);
     }
 
     const size_t token_capacity = chat_len == 0u ? 1u : chat_len;
@@ -380,6 +401,26 @@ done:
     return status;
 }
 
+te_status te_qwen_generate_reference(
+    te_context *context,
+    const char *prompt,
+    uint32_t max_tokens,
+    te_token_callback callback,
+    void *userdata
+) {
+    return te_qwen_generate_text(context, prompt, max_tokens, callback, userdata, 1);
+}
+
+te_status te_qwen_generate_raw(
+    te_context *context,
+    const char *prompt,
+    uint32_t max_tokens,
+    te_token_callback callback,
+    void *userdata
+) {
+    return te_qwen_generate_text(context, prompt, max_tokens, callback, userdata, 0);
+}
+
 static te_status te_qwen_state_init(te_qwen_state *state, const te_context *context, size_t required_context) {
     if (state == NULL || context == NULL || context->model == NULL) {
         return TE_STATUS_INVALID_ARGUMENT;
@@ -454,6 +495,38 @@ static te_status te_qwen_state_init(te_qwen_state *state, const te_context *cont
         state->key_cache == NULL || state->value_cache == NULL) {
         te_qwen_state_release(state);
         return TE_STATUS_OUT_OF_MEMORY;
+    }
+    /* Pure greedy (argmax) decoding degenerates into verbatim repetition loops on
+       longer generations, yet a repetition penalty corrupts structured output (JSON
+       tool calls, code indentation). Low-temperature top-k sampling avoids both: it
+       stays effectively deterministic where the model is confident (so tool-call JSON
+       and code structure are preserved) but escapes the low-confidence loops. Set
+       temperature to 0 to fall back to the fast fused-argmax greedy path. */
+    state->temperature = 0.3f;
+    state->top_k = 40u;
+    state->rng_state = 0x9e3779b97f4a7c15ULL;
+    {
+        const char *temp_env = getenv("TINYENGINE_TEMPERATURE");
+        if (temp_env != NULL) {
+            const float parsed = strtof(temp_env, NULL);
+            if (parsed >= 0.0f && parsed <= 5.0f) {
+                state->temperature = parsed;
+            }
+        }
+        const char *topk_env = getenv("TINYENGINE_TOP_K");
+        if (topk_env != NULL) {
+            const long parsed = strtol(topk_env, NULL, 10);
+            if (parsed >= 1 && parsed <= 1000) {
+                state->top_k = (uint32_t)parsed;
+            }
+        }
+        const char *seed_env = getenv("TINYENGINE_SEED");
+        if (seed_env != NULL) {
+            const unsigned long long parsed = strtoull(seed_env, NULL, 10);
+            if (parsed != 0ULL) {
+                state->rng_state = (uint64_t)parsed;
+            }
+        }
     }
     const size_t rope_half = state->head_dim / 2u;
     for (size_t position = 0; position < state->context_tokens; ++position) {
@@ -1069,10 +1142,14 @@ static te_status te_qwen_forward_project_token(
         TE_QWEN_PROFILE.embed_ms += te_qwen_now_ms() - embed_start;
     }
 
-    const char *disabled = getenv("TINYENGINE_DECODE_PROJECT");
+    const char *project_gate = getenv("TINYENGINE_DECODE_PROJECT");
     const char *head = te_model_find_tensor(model, "output.weight") != NULL ? "output.weight" : "token_embd.weight";
     const te_gguf_tensor *head_tensor = te_model_find_tensor(model, head);
-    if (disabled != NULL && strcmp(disabled, "0") != 0) {
+    /* The fused decode+argmax projection cannot apply temperature sampling (it never
+       materializes the logits), so skip it when sampling is active and fall through
+       to the NULL-head decode + sampled projection below. */
+    const bool sampling_active = state->temperature > 0.0f;
+    if (!sampling_active && (project_gate == NULL || strcmp(project_gate, "0") != 0)) {
         status = te_qwen_decode_all_layers_exact(model, state, position, head_tensor, out_token_id);
         if (status == TE_STATUS_OK) {
             return TE_STATUS_OK;
@@ -1089,11 +1166,148 @@ static te_status te_qwen_forward_project_token(
     return te_qwen_project_next(context, state, out_token_id);
 }
 
+/* xorshift64* PRNG → uniform double in [0, 1). Seeded per generation for reproducibility. */
+static double te_qwen_rng_uniform(te_qwen_state *state) {
+    uint64_t x = state->rng_state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    state->rng_state = x;
+    const uint64_t r = x * 0x2545F4914F6CDD1DULL;
+    return (double)(r >> 11) / 9007199254740992.0; /* 2^53 */
+}
+
+/* Top-k temperature sampling over the full logits. Keeps the k highest logits, applies
+   temperature, then samples from the resulting categorical distribution. */
+static te_status te_qwen_sample_logits(te_qwen_state *state, const float *logits, uint32_t *out_token_id) {
+    const size_t vocab = state->vocab;
+    if (vocab == 0u) {
+        return TE_STATUS_INVALID_ARGUMENT;
+    }
+    size_t k = state->top_k == 0u ? 1u : (size_t)state->top_k;
+    if (k > 1024u) {
+        k = 1024u;
+    }
+    if (k > vocab) {
+        k = vocab;
+    }
+    float top_logits[1024];
+    uint32_t top_index[1024];
+    size_t count = 0u;
+    size_t min_pos = 0u;
+    for (size_t i = 0; i < vocab; ++i) {
+        const float v = logits[i];
+        if (count < k) {
+            top_logits[count] = v;
+            top_index[count] = (uint32_t)i;
+            ++count;
+            if (count == k) {
+                min_pos = 0u;
+                for (size_t j = 1; j < k; ++j) {
+                    if (top_logits[j] < top_logits[min_pos]) {
+                        min_pos = j;
+                    }
+                }
+            }
+        } else if (v > top_logits[min_pos]) {
+            top_logits[min_pos] = v;
+            top_index[min_pos] = (uint32_t)i;
+            min_pos = 0u;
+            for (size_t j = 1; j < k; ++j) {
+                if (top_logits[j] < top_logits[min_pos]) {
+                    min_pos = j;
+                }
+            }
+        }
+    }
+    float max_logit = top_logits[0];
+    for (size_t j = 1; j < count; ++j) {
+        if (top_logits[j] > max_logit) {
+            max_logit = top_logits[j];
+        }
+    }
+    const double temperature = state->temperature > 1e-6f ? (double)state->temperature : 1e-6;
+    double probs[1024];
+    double sum = 0.0;
+    for (size_t j = 0; j < count; ++j) {
+        const double e = exp(((double)top_logits[j] - (double)max_logit) / temperature);
+        probs[j] = e;
+        sum += e;
+    }
+    double r = te_qwen_rng_uniform(state) * sum;
+    size_t choice = count - 1u;
+    double acc = 0.0;
+    for (size_t j = 0; j < count; ++j) {
+        acc += probs[j];
+        if (r <= acc) {
+            choice = j;
+            break;
+        }
+    }
+    *out_token_id = top_index[choice];
+    return TE_STATUS_OK;
+}
+
+/* Full-logits projection followed by top-k temperature sampling, used instead of the
+   fused argmax paths whenever temperature > 0. */
+static te_status te_qwen_project_next_sampled(
+    te_context *context,
+    te_qwen_state *state,
+    const te_gguf_tensor *head_tensor,
+    const char *head,
+    uint32_t *out_token_id
+) {
+    te_model *model = context->model;
+    te_status status = te_rmsnorm_f32(
+        state->hidden_buf,
+        state->output_norm_weight,
+        state->hidden,
+        model->info.rms_norm_epsilon,
+        state->norm);
+    if (status != TE_STATUS_OK) {
+        return status;
+    }
+    const char *metal_argmax = getenv("TINYENGINE_METAL_ARGMAX");
+    status = TE_STATUS_UNSUPPORTED;
+    if ((metal_argmax == NULL || strcmp(metal_argmax, "0") != 0) &&
+        head_tensor != NULL &&
+        head_tensor->n_dims == 2u &&
+        head_tensor->dims[0] == state->hidden &&
+        head_tensor->dims[1] == state->vocab) {
+        const double start = te_qwen_now_ms();
+        status = te_metal_matvec_f32(
+            model->mapping,
+            model->mapping_len,
+            head_tensor->absolute_offset,
+            head_tensor->ggml_type,
+            state->norm,
+            state->hidden,
+            state->vocab,
+            state->logits);
+        if (status == TE_STATUS_OK && TE_QWEN_PROFILE.enabled) {
+            te_qwen_profile_add_matvec(head, te_qwen_now_ms() - start);
+        }
+        if (status != TE_STATUS_OK && status != TE_STATUS_UNSUPPORTED) {
+            return status;
+        }
+    }
+    if (status != TE_STATUS_OK) {
+        status = te_qwen_matvec_exact(model, head, state->norm, state->hidden, state->logits, state->vocab);
+        if (status != TE_STATUS_OK) {
+            return status;
+        }
+    }
+    return te_qwen_sample_logits(state, state->logits, out_token_id);
+}
+
 static te_status te_qwen_project_next(te_context *context, te_qwen_state *state, uint32_t *out_token_id) {
     te_model *model = context->model;
     const char *head = te_model_find_tensor(model, "output.weight") != NULL ? "output.weight" : "token_embd.weight";
     const char *metal_argmax = getenv("TINYENGINE_METAL_ARGMAX");
     const te_gguf_tensor *head_tensor = te_model_find_tensor(model, head);
+    if (state->temperature > 0.0f) {
+        return te_qwen_project_next_sampled(context, state, head_tensor, head, out_token_id);
+    }
     if ((metal_argmax == NULL || strcmp(metal_argmax, "0") != 0) &&
         head_tensor != NULL &&
         head_tensor->n_dims == 2u &&
@@ -2272,6 +2486,14 @@ static int te_qwen_checked_mul(size_t lhs, size_t rhs, size_t *out) {
 }
 
 static int te_qwen_stop_token(const te_model *model, uint32_t token_id) {
+    static int ignore_eos = -1;
+    if (ignore_eos < 0) {
+        const char *env = getenv("TINYENGINE_IGNORE_EOS");
+        ignore_eos = (env != NULL && env[0] == '1') ? 1 : 0;
+    }
+    if (ignore_eos) {
+        return 0;
+    }
     return token_id == model->tokenizer.eos_token_id || token_id == model->tokenizer.padding_token_id;
 }
 
