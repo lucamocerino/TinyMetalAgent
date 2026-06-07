@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/tiny-metal-agent-logo.svg" alt="TinyMetalAgent logo" width="520">
+</p>
+
 # TinyEngine / TinyAgent
 
 Phase 1 is **TinyEngine**: a from-scratch local Metal inference engine for Qwen-class open-source models that can run on consumer Apple Silicon Macs with 8 GB of unified memory.
